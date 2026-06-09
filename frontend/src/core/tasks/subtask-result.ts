@@ -13,7 +13,7 @@ export interface SubtaskResultUpdate {
  * ``ToolMessage.additional_kwargs`` for every ``task`` tool result.
  *
  * The values mirror the Python contract in
- * ``backend/packages/harness/deerflow/subagents/status_contract.py``
+ * ``backend/packages/harness/QcdocAgent/subagents/status_contract.py``
  * (``SUBAGENT_STATUS_KEY`` / ``SUBAGENT_ERROR_KEY``). The cross-language
  * fixture at ``contracts/subagent_status_contract.json`` pins both sides
  * to the same values.
@@ -42,9 +42,9 @@ const STRUCTURED_STATUS_TO_SUBTASK: Record<string, SubtaskStatus> = {
  *
  * These values are not user-facing copy — they are part of the
  * backend↔frontend contract defined in
- * `backend/packages/harness/deerflow/tools/builtins/task_tool.py` (returned
+ * `backend/packages/harness/QcdocAgent/tools/builtins/task_tool.py` (returned
  * from the tool body) and in
- * `backend/packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py`
+ * `backend/packages/harness/QcdocAgent/agents/middlewares/tool_error_handling_middleware.py`
  * (wrapper for tool exceptions). Any change here must be paired with the
  * matching backend change. Exported so a future structured-status migration
  * can reference the same values from one place.
@@ -65,7 +65,7 @@ export const ERROR_WRAPPER_PATTERN = /^Error\b/i;
 /**
  * Map a `task` tool result to a {@link SubtaskStatus}.
  *
- * Bytedance/deer-flow issue #3146: prefers the structured
+ * Bytedance/QcdocAgent issue #3146: prefers the structured
  * ``additional_kwargs.subagent_status`` field the backend now stamps via
  * ``ToolErrorHandlingMiddleware``. Falls back to the legacy prefix
  * matching for messages that pre-date the stamping commit (historical

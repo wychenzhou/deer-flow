@@ -8,8 +8,12 @@ import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
 
 export const metadata: Metadata = {
-  title: "DeerFlow",
+  title: "QcdocAgent",
   description: "A LangChain-based framework for building super agents.",
+  icons: {
+    icon: "/qcdoc.png",
+    apple: "/qcdoc.png",
+  },
 };
 
 export default async function RootLayout({
