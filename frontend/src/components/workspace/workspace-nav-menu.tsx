@@ -35,7 +35,7 @@ function NavMenuButtonContent({
 export function WorkspaceNavMenu() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDefaultSection] = useState<
-    "appearance" | "memory" | "tools" | "skills" | "notification" | "about"
+    "appearance" | "memory" | "tools" | "skills" | "notification"
   >("appearance");
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
