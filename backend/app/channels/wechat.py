@@ -22,8 +22,9 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.channels.base import Channel
-from app.channels.commands import is_known_channel_command
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.commands import extract_connect_code, is_known_channel_command
+from app.channels.connection_identity import attach_connection_identity
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,7 @@ class WechatChannel(Channel):
         self._state_dir = self._resolve_state_dir(config.get("state_dir"))
         self._cursor_path = self._state_dir / "wechat-getupdates.json" if self._state_dir else None
         self._auth_path = self._state_dir / "wechat-auth.json" if self._state_dir else None
+        self._connection_repo = config.get("connection_repo")
         self._load_state()
 
     async def start(self) -> None:
@@ -340,27 +342,15 @@ class WechatChannel(Channel):
             "base_info": self._base_info(),
         }
 
-        last_exc: Exception | None = None
-        for attempt in range(max_retries):
-            try:
-                data = await self._request_json("/ilink/bot/sendmessage", payload)
-                self._ensure_success(data, "sendmessage")
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < max_retries - 1:
-                    delay = 2**attempt
-                    logger.warning(
-                        "[WeChat] send failed (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1,
-                        max_retries,
-                        delay,
-                        exc,
-                    )
-                    await asyncio.sleep(delay)
+        async def send_message() -> None:
+            data = await self._request_json("/ilink/bot/sendmessage", payload)
+            self._ensure_success(data, "sendmessage")
 
-        logger.error("[WeChat] send failed after %d attempts: %s", max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        await self._send_with_retry(
+            send_message,
+            max_retries=max_retries,
+            log_prefix="[WeChat]",
+        )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if attachment.is_image:
@@ -617,6 +607,16 @@ class WechatChannel(Channel):
             if thread_ts:
                 self._context_tokens_by_thread[thread_ts] = context_token
 
+        connect_code = extract_connect_code(text)
+        if connect_code and self._connection_repo is not None:
+            handled = await self._bind_connection_from_connect_code(
+                chat_id=chat_id,
+                context_token=context_token,
+                code=connect_code,
+            )
+            if handled:
+                return
+
         inbound = self._make_inbound(
             chat_id=chat_id,
             user_id=chat_id,
@@ -632,7 +632,53 @@ class WechatChannel(Channel):
             },
         )
         inbound.topic_id = None
+        inbound = await self._attach_connection_identity(inbound)
         await self.bus.publish_inbound(inbound)
+
+    async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
+        return await attach_connection_identity(
+            inbound,
+            repo=self._connection_repo,
+            provider="wechat",
+            workspace_id=inbound.chat_id,
+        )
+
+    async def _bind_connection_from_connect_code(self, *, chat_id: str, context_token: str, code: str) -> bool:
+        if self._connection_repo is None or not code:
+            return False
+
+        state = await self._connection_repo.consume_oauth_state(provider="wechat", state=code)
+        if state is None:
+            await self._send_connection_reply(chat_id, context_token, "WeChat connection code is invalid or expired.")
+            return True
+
+        if not chat_id:
+            await self._send_connection_reply(chat_id, context_token, "WeChat connection could not be completed from this message.")
+            return True
+
+        await self._connection_repo.upsert_connection(
+            owner_user_id=state["owner_user_id"],
+            provider="wechat",
+            external_account_id=chat_id,
+            workspace_id=chat_id,
+            metadata={
+                "context_token": context_token,
+            },
+            status="connected",
+        )
+        await self._send_connection_reply(chat_id, context_token, "WeChat connected to DeerFlow.")
+        return True
+
+    async def _send_connection_reply(self, chat_id: str, context_token: str, text: str) -> None:
+        if not context_token:
+            return
+        await self._send_text_message(
+            chat_id=chat_id,
+            context_token=context_token,
+            text=text,
+            client_id_prefix="deerflow-connect",
+            max_retries=1,
+        )
 
     async def _ensure_authenticated(self) -> bool:
         async with self._auth_lock:

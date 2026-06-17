@@ -2,6 +2,7 @@
 
 import {
   BellIcon,
+  CableIcon,
   BrainIcon,
   PaletteIcon,
   SparklesIcon,
@@ -19,6 +20,7 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
+import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
 import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
 import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
@@ -29,6 +31,7 @@ import { cn } from "@/lib/utils";
 type SettingsSection =
   | "account"
   | "appearance"
+  | "channels"
   | "memory"
   | "tools"
   | "skills"
@@ -70,6 +73,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: BellIcon,
       },
       {
+        id: "channels",
+        label: t.settings.sections.channels,
+        icon: CableIcon,
+      },
+      {
         id: "memory",
         label: t.settings.sections.memory,
         icon: BrainIcon,
@@ -80,6 +88,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
     [
       t.settings.sections.account,
       t.settings.sections.appearance,
+      t.settings.sections.channels,
       t.settings.sections.memory,
       t.settings.sections.tools,
       t.settings.sections.skills,
@@ -138,6 +147,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 />
               )}
               {activeSection === "notification" && <NotificationSettingsPage />}
+              {activeSection === "channels" && <ChannelsSettingsPage />}
             </div>
           </ScrollArea>
         </div>

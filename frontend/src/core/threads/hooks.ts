@@ -9,7 +9,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -26,6 +26,11 @@ import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
 import { fetchThreadTokenUsage } from "./api";
+import {
+  buildThreadsSearchQueryOptions,
+  DEFAULT_THREAD_SEARCH_PARAMS,
+  type ThreadSearchParams,
+} from "./thread-search-query";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type {
   AgentThread,
@@ -41,6 +46,7 @@ export type ToolEndEvent = {
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
+  displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
   isMock?: boolean;
   onSend?: (threadId: string) => void;
@@ -51,6 +57,13 @@ export type ThreadStreamOptions = {
 
 type SendMessageOptions = {
   additionalKwargs?: Record<string, unknown>;
+};
+
+const EMPTY_THREAD_VALUES: AgentThreadState = {
+  title: "",
+  messages: [],
+  artifacts: [],
+  todos: [],
 };
 
 function isNonEmptyString(value: string | undefined): value is string {
@@ -386,8 +399,37 @@ function getStreamErrorMessage(error: unknown): string {
   return "Request failed.";
 }
 
+function getHttpStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null) {
+    return undefined;
+  }
+
+  const status = Reflect.get(error, "status");
+  if (typeof status === "number") {
+    return status;
+  }
+
+  const response = Reflect.get(error, "response");
+  if (typeof response === "object" && response !== null) {
+    const responseStatus = Reflect.get(response, "status");
+    if (typeof responseStatus === "number") {
+      return responseStatus;
+    }
+  }
+
+  return undefined;
+}
+
+function isThreadMissingError(error: unknown): boolean {
+  const status = getHttpStatus(error);
+  // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
+  // exists; callers redirect stale/inaccessible URLs back to a blank chat.
+  return status === 403 || status === 404;
+}
+
 export function useThreadStream({
   threadId,
+  displayThreadId,
   context,
   isMock,
   onSend,
@@ -396,6 +438,18 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const { t } = useI18n();
+  const currentViewThreadId = displayThreadId ?? threadId ?? null;
+  const currentViewThreadIdRef = useRef(currentViewThreadId);
+  currentViewThreadIdRef.current = currentViewThreadId;
+  // Optimistic messages shown before the server stream responds.
+  const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
+  const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
+    null,
+  );
+  const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
+    string | null
+  >(null);
+  const [isUploading, setIsUploading] = useState(false);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
   // Ref to track current thread ID across async callbacks without causing re-renders,
@@ -437,6 +491,28 @@ export function useThreadStream({
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
+    setOptimisticThreadId((currentOptimisticThreadId) => {
+      const currentView = currentViewThreadIdRef.current;
+      if (
+        currentOptimisticThreadId &&
+        (currentOptimisticThreadId === currentView ||
+          currentOptimisticThreadId === _threadId)
+      ) {
+        return _threadId;
+      }
+      return currentOptimisticThreadId;
+    });
+    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+      const currentView = currentViewThreadIdRef.current;
+      if (
+        currentLiveMessagesThreadId &&
+        (currentLiveMessagesThreadId === currentView ||
+          currentLiveMessagesThreadId === _threadId)
+      ) {
+        return _threadId;
+      }
+      return currentLiveMessagesThreadId;
+    });
     if (!startedRef.current) {
       listeners.current.onStart?.(_threadId, _runId);
       startedRef.current = true;
@@ -608,6 +684,8 @@ export function useThreadStream({
     },
     onError(error) {
       setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+      setLiveMessagesThreadId(null);
       toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
@@ -639,10 +717,17 @@ export function useThreadStream({
     },
   });
 
-  // Optimistic messages shown before the server stream responds
-  const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
-  const humanMessageCount = thread.messages.filter(
+  const hasVisibleStreamState =
+    Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
+  const persistedMessages = useMemo(
+    () => (hasVisibleStreamState ? thread.messages : []),
+    [hasVisibleStreamState, thread.messages],
+  );
+  const visibleHistory = useMemo(
+    () => (threadId ? history : []),
+    [history, threadId],
+  );
+  const humanMessageCount = persistedMessages.filter(
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
@@ -663,14 +748,22 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
-    pendingUsageBaselineMessageIdsRef.current = new Set(
-      messagesRef.current
-        .map(messageIdentity)
-        .filter((id): id is string => Boolean(id)),
-    );
+    messagesRef.current = [];
+    summarizedRef.current = new Set<string>();
+    pendingUsageBaselineMessageIdsRef.current = new Set();
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
+
+  useEffect(() => {
+    if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
+      setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+    }
+    if (liveMessagesThreadId && liveMessagesThreadId !== currentViewThreadId) {
+      setLiveMessagesThreadId(null);
+    }
+  }, [currentViewThreadId, liveMessagesThreadId, optimisticThreadId]);
 
   // When streaming starts without a baseline (e.g. reconnection, run started
   // from another client, or page reload mid-stream), snapshot the current
@@ -681,12 +774,12 @@ export function useThreadStream({
       pendingUsageBaselineMessageIdsRef.current.size === 0
     ) {
       pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
+        persistedMessages
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
     }
-  }, [thread.isLoading, thread.messages]);
+  }, [persistedMessages, thread.isLoading]);
 
   // Clear optimistic when server messages arrive.
   // For messages with a human optimistic message, wait until the server's
@@ -702,6 +795,7 @@ export function useThreadStream({
 
     if (!hasHumanOptimistic || newHumanMsgArrived) {
       setOptimisticMessages([]);
+      setOptimisticThreadId(null);
     }
   }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
 
@@ -723,7 +817,7 @@ export function useThreadStream({
       // messages so we can wait for the server's copy of the user input.
       prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
-        thread.messages
+        persistedMessages
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
       );
@@ -762,6 +856,8 @@ export function useThreadStream({
           additional_kwargs: { element: "task" },
         });
       }
+      setOptimisticThreadId(threadId);
+      setLiveMessagesThreadId(threadId);
       setOptimisticMessages(newOptimistic);
 
       listeners.current.onSend?.(threadId);
@@ -827,6 +923,8 @@ export function useThreadStream({
                 : "Failed to upload files.";
             toast.error(errorMessage);
             setOptimisticMessages([]);
+            setOptimisticThreadId(null);
+            setLiveMessagesThreadId(null);
             throw error;
           } finally {
             setIsUploading(false);
@@ -895,35 +993,44 @@ export function useThreadStream({
         });
       } catch (error) {
         setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        setLiveMessagesThreadId(null);
         setIsUploading(false);
         throw error;
       } finally {
         sendInFlightRef.current = false;
       }
     },
-    [thread, t.uploads.uploadingFiles, context, queryClient, humanMessageCount],
+    [
+      thread,
+      t.uploads.uploadingFiles,
+      context,
+      queryClient,
+      humanMessageCount,
+      persistedMessages,
+    ],
   );
 
   // Cache the latest thread messages in a ref to compare against incoming history messages for deduplication,
   // and to allow access to the full message list in onUpdateEvent without causing re-renders.
-  if (thread.messages.length >= messagesRef.current.length) {
-    messagesRef.current = thread.messages;
+  if (persistedMessages.length >= messagesRef.current.length) {
+    messagesRef.current = persistedMessages;
   }
 
   const visibleOptimisticMessages = getVisibleOptimisticMessages(
-    optimisticMessages,
+    optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
     prevHumanMsgCountRef.current,
     humanMessageCount,
   );
 
   const mergedMessages = mergeMessages(
-    history,
-    thread.messages,
+    visibleHistory,
+    persistedMessages,
     visibleOptimisticMessages,
   );
   const pendingUsageMessages = thread.isLoading
     ? getMessagesAfterBaseline(
-        thread.messages,
+        persistedMessages,
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
@@ -932,6 +1039,7 @@ export function useThreadStream({
   // History messages may overlap with thread.messages; thread.messages take precedence
   const mergedThread = {
     ...thread,
+    values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;
 
@@ -1113,12 +1221,22 @@ export function useThreadHistory(
       return dedupeMessagesByIdentity([...prev, ..._messages]);
     });
   }, []);
+  const hasThreadId = Boolean(threadId);
+  const hasUnloadedRuns = Boolean(
+    runs.data?.some((run) => !loadedRunIdsRef.current.has(run.run_id)),
+  );
+  const isRunsLoading =
+    enabled &&
+    hasThreadId &&
+    (runs.isLoading || (runs.isFetching && !runs.data));
+  const isRunsUnresolved =
+    enabled && hasThreadId && !runs.data && !runs.isError;
   const hasMore =
-    enabled && Boolean(threadId) && (indexRef.current >= 0 || !runs.data);
+    enabled && hasThreadId && (indexRef.current >= 0 || hasUnloadedRuns);
   return {
     runs: runs.data,
     messages,
-    loading,
+    loading: loading || isRunsLoading || isRunsUnresolved,
     appendMessages,
     hasMore,
     loadMore: loadMessages,
@@ -1126,69 +1244,11 @@ export function useThreadHistory(
 }
 
 export function useThreads(
-  params: Parameters<ThreadsClient["search"]>[0] = {
-    limit: 50,
-    sortBy: "updated_at",
-    sortOrder: "desc",
-    select: ["thread_id", "updated_at", "values", "metadata"],
-  },
+  params: ThreadSearchParams = DEFAULT_THREAD_SEARCH_PARAMS,
 ) {
   const apiClient = getAPIClient();
   return useQuery<AgentThread[]>({
-    queryKey: ["threads", "search", params],
-    queryFn: async () => {
-      const maxResults = params.limit;
-      const initialOffset = params.offset ?? 0;
-      const DEFAULT_PAGE_SIZE = 50;
-
-      // Preserve prior semantics: if a non-positive limit is explicitly provided,
-      // delegate to a single search call with the original parameters.
-      if (maxResults !== undefined && maxResults <= 0) {
-        const response =
-          await apiClient.threads.search<AgentThreadState>(params);
-        return response as AgentThread[];
-      }
-
-      const pageSize =
-        typeof maxResults === "number" && maxResults > 0
-          ? Math.min(DEFAULT_PAGE_SIZE, maxResults)
-          : DEFAULT_PAGE_SIZE;
-
-      const threads: AgentThread[] = [];
-      let offset = initialOffset;
-
-      while (true) {
-        if (typeof maxResults === "number" && threads.length >= maxResults) {
-          break;
-        }
-
-        const currentLimit =
-          typeof maxResults === "number"
-            ? Math.min(pageSize, maxResults - threads.length)
-            : pageSize;
-
-        if (typeof maxResults === "number" && currentLimit <= 0) {
-          break;
-        }
-
-        const response = (await apiClient.threads.search<AgentThreadState>({
-          ...params,
-          limit: currentLimit,
-          offset,
-        })) as AgentThread[];
-
-        threads.push(...response);
-
-        if (response.length < currentLimit) {
-          break;
-        }
-
-        offset += response.length;
-      }
-
-      return threads;
-    },
-    refetchOnWindowFocus: false,
+    ...buildThreadsSearchQueryOptions(apiClient, params),
   });
 }
 
@@ -1291,6 +1351,36 @@ export function useThreadRuns(
   });
 }
 
+export function useThreadMetadata(
+  threadId?: string | null,
+  {
+    enabled = true,
+    isMock = false,
+  }: { enabled?: boolean; isMock?: boolean } = {},
+) {
+  const apiClient = getAPIClient(isMock);
+  return useQuery<AgentThread | null>({
+    queryKey: ["thread", "metadata", threadId, isMock],
+    queryFn: async () => {
+      if (!threadId) {
+        return null;
+      }
+      try {
+        const response = await apiClient.threads.get(threadId);
+        return response as AgentThread;
+      } catch (error) {
+        if (isThreadMissingError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    enabled: enabled && Boolean(threadId),
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
 export function useThreadTokenUsage(
   threadId?: string | null,
   { enabled = true }: { enabled?: boolean } = {},
@@ -1325,8 +1415,15 @@ export function useDeleteThread() {
   const queryClient = useQueryClient();
   const apiClient = getAPIClient();
   return useMutation({
-    mutationFn: async ({ threadId }: { threadId: string }) => {
+    mutationFn: async ({
+      threadId,
+      onRemoteDeleted,
+    }: {
+      threadId: string;
+      onRemoteDeleted?: () => void;
+    }) => {
       await apiClient.threads.delete(threadId);
+      onRemoteDeleted?.();
 
       const response = await fetch(
         `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
