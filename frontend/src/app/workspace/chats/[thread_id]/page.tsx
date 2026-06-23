@@ -11,7 +11,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
-import { ExportTrigger } from "@/components/workspace/export-trigger";
+
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -199,7 +199,7 @@ export default function ChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
-              <ExportTrigger threadId={threadId} />
+
               <ArtifactTrigger />
             </div>
           </header>

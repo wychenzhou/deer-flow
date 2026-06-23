@@ -10,7 +10,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
-import { ExportTrigger } from "@/components/workspace/export-trigger";
+
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -212,7 +212,7 @@ export default function AgentChatPage() {
                   setLocalSettings("tokenUsage", preferences)
                 }
               />
-              <ExportTrigger threadId={threadId} />
+
               <ArtifactTrigger />
             </div>
           </header>
