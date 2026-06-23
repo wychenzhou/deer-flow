@@ -67,7 +67,7 @@ export const enUS: Translations = {
 
     createYourOwnSkill: "Create Your Own Skill",
     createYourOwnSkillDescription:
-      "Create your own skill to release the power of QcdocAgent. With customized skills,\nQcdocAgent can help you search on the web, analyze data, and generate\n artifacts like slides, web pages and do almost anything.",
+      "Create your own skill to release the power of QcdocAgent.\nWith customized skills, QcdocAgent can help you search on the web, analyze data,\nand generate artifacts like slides, web pages and do almost anything.",
   },
 
   // Clipboard

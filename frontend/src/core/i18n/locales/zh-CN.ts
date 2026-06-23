@@ -63,11 +63,11 @@ export const zhCN: Translations = {
   welcome: {
     greeting: "你好，欢迎回来！",
     description:
-      "欢迎使用 QcdocAgent —— 企业级超级智能体。\n通过内置和自定义的 Skills，可以帮您完成档案调阅、客户分析、语音分析、文档质检、\n流程自动化，还能搜索网络、分析数据，生成幻灯片、图片、播客及网页等内容，\n同时无缝集成OA办公、档案管理等业务系统，几乎可以做任何事情!",
+      "欢迎使用 QcdocAgent —— 企业级超级智能体。\n通过内置和自定义的 Skills，可以帮您完成档案调阅、客户分析、语音分析、文档质检、流程自动化，\n还能搜索网络、分析数据，生成幻灯片、图片、播客及网页等内容，\n同时无缝集成OA办公、档案管理等业务系统，几乎可以做任何事情！",
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 QcdocAgent 的潜力。通过自定义技能，QcdocAgent\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 QcdocAgent 的潜力。\n通过自定义技能，QcdocAgent 可以帮你搜索网络、分析数据，\n还能为你生成幻灯片、网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
