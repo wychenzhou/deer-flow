@@ -20,7 +20,7 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
-import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -188,17 +188,6 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <TokenUsageIndicator
-                threadId={isNewThread ? undefined : threadId}
-                backendUsage={backendTokenUsage}
-                enabled={tokenUsageEnabled}
-                messages={thread.messages}
-                pendingMessages={pendingUsageMessages}
-                preferences={localSettings.tokenUsage}
-                onPreferencesChange={(preferences) =>
-                  setLocalSettings("tokenUsage", preferences)
-                }
-              />
 
               <ArtifactTrigger />
             </div>
