@@ -2,6 +2,8 @@
 docker/.cache/
 # oh-my-claudecode state
 .omc/
+# Agent skills installed via npx skills
+.agents/
 # OS generated files
 .DS_Store
 *.local
