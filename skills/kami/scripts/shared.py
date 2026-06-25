@@ -121,6 +121,8 @@ HTML_TEMPLATES: dict[str, TemplateSpec] = {
     # Slides (WeasyPrint default)
     "slides-weasy":    TemplateSpec("slides-weasy.html",    0),
     "slides-weasy-en": TemplateSpec("slides-weasy-en.html", 0),
+    # Custom templates
+    "xiaochu-manual":  TemplateSpec("xiaochu-manual.html",  0),
 }
 
 SCREEN_TEMPLATES: dict[str, str] = {
