@@ -50,6 +50,7 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    regenerate: "重新生成",
   },
 
   // Home
@@ -62,11 +63,11 @@ export const zhCN: Translations = {
   welcome: {
     greeting: "你好，欢迎回来！",
     description:
-      "欢迎使用 QcdocAgent —— 企业级超级智能体。\n通过内置和自定义的 Skills，可以帮您完成档案调阅、客户分析、语音分析、文档质检、\n流程自动化，还能搜索网络、分析数据，生成幻灯片、图片、播客及网页等内容，\n同时无缝集成OA办公、档案管理等业务系统，几乎可以做任何事情!",
+      "欢迎使用 QcdocAgent —— 企业级超级智能体。通过内置和自定义的 Skills，可以帮您完成档案调阅、客户分析、语音分析、文档质检、流程自动化，还能搜索网络、分析数据，同时无缝集成OA办公、档案管理等业务系统！",
 
     createYourOwnSkill: "创建你自己的 Agent SKill",
     createYourOwnSkillDescription:
-      "创建你的 Agent Skill 来释放 QcdocAgent 的潜力。通过自定义技能，QcdocAgent\n可以帮你搜索网络、分析数据，还能为你生成幻灯片、\n网页等作品，几乎可以做任何事情。",
+      "创建你的 Agent Skill 来释放 QcdocAgent 的潜力。\n通过自定义技能，QcdocAgent 可以帮你搜索网络、分析数据，\n还能为你生成幻灯片、网页等作品，几乎可以做任何事情。",
   },
 
   // Clipboard
@@ -511,8 +512,12 @@ export const zhCN: Translations = {
       profileTitle: "个人信息",
       email: "邮箱",
       role: "角色",
+      ssoProvider: "SSO",
       changePasswordTitle: "修改密码",
       changePasswordDescription: "更新你的账号密码。",
+      ssoPasswordDescription: "密码由你的 SSO 提供商管理。",
+      ssoPasswordMessage:
+        "此账号通过 {provider} 登录，DeerFlow 无法在此管理或修改密码。请前往你的 SSO 提供商账号设置中进行操作。",
       currentPassword: "当前密码",
       newPassword: "新密码",
       confirmNewPassword: "确认新密码",
@@ -527,6 +532,32 @@ export const zhCN: Translations = {
     acknowledge: {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",
+    },
+  },
+  login: {
+    signInTitle: "登录你的账号",
+    createAccountTitle: "创建新账号",
+    email: "邮箱",
+    emailPlaceholder: "you@example.com",
+    password: "密码",
+    passwordPlaceholder: "•••••••",
+    pleaseWait: "请稍候...",
+    signIn: "登录",
+    createAccount: "创建账号",
+    orContinueWith: "或使用以下方式登录",
+    ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
+    continueWith: (provider: string) => `使用 ${provider} 登录`,
+    noAccountSignUp: "还没有账号？立即注册",
+    haveAccountSignIn: "已有账号？立即登录",
+    backToHome: "← 返回首页",
+    networkError: "网络错误，请重试。",
+    authFailed: "身份验证失败。",
+    errors: {
+      sso_failed: "SSO 登录失败，请重试或使用邮箱登录。",
+      sso_cancelled: "SSO 登录已取消。",
+      sso_account_exists:
+        "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
+      sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
     },
   },
 };

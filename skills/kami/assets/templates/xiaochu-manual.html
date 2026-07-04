@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>销售智能助手「小楚」使用说明</title>
+<meta name="author" content="江苏永山窍档案管理服务有限公司">
+<meta name="description" content="AI销售助手小楚使用指南 - 客户画像、项目分析、战略覆盖、日程管理">
+<meta name="keywords" content="小楚,销售助手,AI,档案管理,使用说明">
+<meta name="generator" content="Kami">
+<style>
+  @font-face { font-family:"TsangerJinKai02"; src:url("../fonts/TsangerJinKai02-W04.ttf") format("truetype"), url("https://cdn.jsdelivr.net/gh/tw93/Kami@main/assets/fonts/TsangerJinKai02-W04.ttf") format("truetype"); font-weight:400; font-style:normal; }
+  @font-face { font-family:"TsangerJinKai02"; src:url("../fonts/TsangerJinKai02-W05.ttf") format("truetype"), url("https://cdn.jsdelivr.net/gh/tw93/Kami@main/assets/fonts/TsangerJinKai02-W05.ttf") format("truetype"); font-weight:500; font-style:normal; }
+
+  @page { size:A4; margin:20mm 22mm 22mm 22mm; background:#f5f4ed;
+    @top-right { content:string(section-title); font-family:"TsangerJinKai02","Source Han Serif SC","Noto Serif CJK SC","Songti SC",Georgia,serif; font-size:8pt; color:#6b6a64; }
+    @bottom-center { content:counter(page) "  ·  小楚使用说明"; font-family:"TsangerJinKai02","Source Han Serif SC","Noto Serif CJK SC","Songti SC",Georgia,serif; font-size:9pt; color:#6b6a64; }
+  }
+  @page:first { @top-right { content:""; } @bottom-center { content:""; } }
+
+  * { box-sizing:border-box; margin:0; padding:0; }
+
+  :root {
+    --parchment:#f5f4ed; --ivory:#faf9f5; --near-black:#141413; --dark-warm:#3d3d3a;
+    --olive:#504e49; --stone:#6b6a64; --brand:#1B365D; --border:#e8e6dc; --border-soft:#e5e3d8;
+    --tag-bg:#E4ECF5;
+    --serif:"TsangerJinKai02","Source Han Serif SC","Noto Serif CJK SC","Songti SC","STSong",Georgia,serif;
+    --sans:var(--serif);
+    --rhythm-module:14pt; --rhythm-section:18pt;
+  }
+
+  html, body { background:var(--parchment); }
+  @media screen { body { max-width:210mm; margin:0 auto; padding:20mm 22mm 22mm 22mm; } }
+
+  body { color:var(--near-black); font-family:var(--serif); font-size:10.5pt; line-height:1.55; letter-spacing:0.3pt; widows:3; orphans:3; }
+
+  .cover { min-height:240mm; display:flex; flex-direction:column; justify-content:space-between; padding:40mm 0 0 0; break-after:page; }
+  .cover-eyebrow { font-family:var(--sans); font-size:10pt; color:var(--brand); letter-spacing:1pt; text-transform:uppercase; margin-bottom:18pt; }
+  .cover-title { font-size:36pt; font-weight:500; color:var(--near-black); line-height:1.15; letter-spacing:0.3pt; margin-bottom:16pt; }
+  .cover-sub { font-family:var(--sans); font-size:14pt; color:var(--olive); line-height:1.5; max-width:85%; margin-bottom:30pt; }
+  .cover-meta { font-family:var(--sans); font-size:10pt; color:var(--stone); line-height:1.5; }
+  .cover-meta strong { color:var(--dark-warm); font-weight:500; }
+
+  .toc { break-after:page; }
+  .toc h2 { font-size:22pt; font-weight:500; margin-bottom:var(--rhythm-module); border-left:2.5pt solid var(--brand); border-radius:1.5pt; padding-left:8pt; }
+  .toc-item { display:flex; justify-content:space-between; align-items:baseline; padding:6pt 0; border-bottom:0.3pt dotted var(--border); font-size:11pt; }
+  .toc-item:last-of-type { border-bottom:none; }
+  .toc-num { color:var(--brand); font-weight:500; min-width:30pt; }
+  .toc-title { flex:1; color:var(--near-black); padding-left:6pt; }
+  .toc-page { color:var(--stone); font-variant-numeric:tabular-nums; }
+
+  h1 { font-size:22pt; font-weight:500; line-height:1.2; margin:0 0 10pt 0; border-left:2.5pt solid var(--brand); border-radius:1.5pt; padding-left:8pt; color:var(--near-black); break-after:avoid; }
+  h2 { font-size:16pt; font-weight:500; line-height:1.25; margin:24pt 0 8pt 0; color:var(--near-black); break-after:avoid; string-set:section-title content(); }
+  h3 { font-size:13pt; font-weight:500; line-height:1.3; margin:18pt 0 6pt 0; color:var(--dark-warm); break-after:avoid; }
+  .chapter-num { font-family:var(--sans); font-size:10pt; color:var(--brand); letter-spacing:1pt; text-transform:uppercase; margin-bottom:6pt; }
+
+  p { margin:0 0 10pt 0; line-height:1.55; color:var(--near-black); widows:2; orphans:2; }
+  .lead { font-size:12pt; line-height:1.55; color:var(--dark-warm); margin-bottom:var(--rhythm-module); }
+  .hl { color:var(--brand); font-weight:500; }
+  strong { font-weight:500; }
+
+  ul, ol { margin:6pt 0 10pt 0; padding-left:20pt; line-height:1.55; }
+  ul li::marker { color:var(--brand); }
+  ol li::marker { color:var(--brand); font-weight:500; }
+
+  blockquote { border-left:2pt solid var(--brand); margin:12pt 0; padding:4pt 0 4pt 16pt; color:var(--olive); line-height:1.55; break-inside:avoid; }
+
+  table, .kami-table { width:100%; border-collapse:collapse; font-size:9.5pt; margin:12pt 0; break-inside:avoid; }
+  table th, .kami-table th { text-align:left; font-weight:500; color:var(--dark-warm); padding:6pt 8pt; border-bottom:1pt solid var(--border); background:transparent; }
+  table td, .kami-table td { padding:5pt 8pt; border-bottom:0.3pt solid var(--border-soft); vertical-align:top; }
+
+  .callout { background:var(--ivory); border-left:2pt solid var(--brand); padding:10pt 14pt; border-radius:3pt; margin:12pt 0; line-height:1.55; break-inside:avoid; }
+  .takeaway { background:var(--ivory); border-radius:4pt; padding:10pt 14pt; margin:14pt 0; break-inside:avoid; }
+  .takeaway-label { font-family:var(--sans); font-size:9pt; color:var(--brand); letter-spacing:0.5pt; text-transform:uppercase; margin-bottom:4pt; }
+  .tag { display:inline-block; background:var(--tag-bg); color:var(--brand); font-family:var(--sans); font-size:9pt; font-weight:500; padding:1pt 6pt; border-radius:3pt; margin-right:4pt; }
+  .chapter { break-before:page; }
+  .exec-summary { background:var(--ivory); border-left:1.4pt solid var(--brand); border-radius:6pt; padding:16pt 20pt; margin:14pt 0; break-inside:avoid; }
+  .exec-summary h2 { margin-top:0; font-size:13pt; }
+</style>
+</head>
+<body>
+
+<!-- ═════════════ COVER ═════════════ -->
+<section class="cover">
+  <div>
+    <div class="cover-eyebrow">销售智能助手 · 使用指南</div>
+    <div class="cover-title">小楚<br>使用说明</div>
+    <div class="cover-sub">AI 销售助手「小楚」完整操作手册，涵盖客户画像、项目分析、战略覆盖、日程管理四大功能</div>
+  </div>
+  <div class="cover-meta">
+    <strong>江苏永山窍档案管理服务有限公司</strong><br>
+    版本 V1.0  ·  2026 年 06 月<br>
+    管理员：陈洲
+  </div>
+</section>
+
+<!-- ═════════════ 目录 ═════════════ -->
+<section class="toc">
+  <h2>目录</h2>
+  <div class="toc-item"><span class="toc-num">一</span><span class="toc-title">小楚是什么？</span><span class="toc-page">03</span></div>
+  <div class="toc-item"><span class="toc-num">二</span><span class="toc-title">使用场景</span><span class="toc-page">04</span></div>
+  <div class="toc-item" style="padding-left:30pt;"><span class="toc-num">2.1</span><span class="toc-title">客户 360 度画像</span><span class="toc-page">04</span></div>
+  <div class="toc-item" style="padding-left:30pt;"><span class="toc-num">2.2</span><span class="toc-title">项目深度分析报告</span><span class="toc-page">05</span></div>
+  <div class="toc-item" style="padding-left:30pt;"><span class="toc-num">2.3</span><span class="toc-title">战略客户覆盖清单</span><span class="toc-page">06</span></div>
+  <div class="toc-item" style="padding-left:30pt;"><span class="toc-num">2.4</span><span class="toc-title">日程管理</span><span class="toc-page">07</span></div>
+  <div class="toc-item"><span class="toc-num">三</span><span class="toc-title">重要注意事项（必读）</span><span class="toc-page">09</span></div>
+  <div class="toc-item"><span class="toc-num">四</span><span class="toc-title">常见问题</span><span class="toc-page">11</span></div>
+  <div class="toc-item"><span class="toc-num">五</span><span class="toc-title">一句话总结</span><span class="toc-page">12</span></div>
+</section>
+
+<!-- ═════════════ 第一章：小楚是什么 ═════════════ -->
+<section class="chapter">
+  <div class="chapter-num">一 · About</div>
+  <h1>小楚是什么？</h1>
+
+  <p class="lead">
+    小楚是江苏永山窍档案管理服务有限公司的<span class="hl">AI 销售助手</span>，已接入超兔 CRM、企业工商数据库、博查联网搜索等多个数据源。
+  </p>
+
+  <p>每个销售都有自己的独立账号，小楚只看得到你自己权限范围内的客户数据。只需用自然语言描述需求，小楚即可帮你完成客户调研、招投标分析、覆盖统计和日程管理等工作。</p>
+
+  <div class="callout">
+    <strong>一句话理解：</strong>小楚是你的专属销售情报员 + 日程秘书，问什么答什么，说人话就行。
+  </div>
+</section>
+
+<!-- ═════════════ 第二章：使用场景 ═════════════ -->
+<section class="chapter">
+  <div class="chapter-num">二 · Features</div>
+  <h1>使用场景</h1>
+
+  <p class="lead">小楚目前支持四大核心功能，覆盖销售日常工作中最频繁的信息查询和管理场景。</p>
+
+  <!-- ===== 功能一 ===== -->
+  <h2>功能一：客户 360 度画像</h2>
+
+  <p><strong>用途：</strong>拜访客户前，快速了解这家公司的底细——工商信息、领导层、主营业务、是否有档案管理需求、跟我们的历史合作记录等。</p>
+
+  <h3>怎么问</h3>
+  <table>
+    <thead><tr><th>你说的</th><th>小楚理解</th></tr></thead>
+    <tbody>
+      <tr><td>"查一下 XX 公司"</td><td>出完整画像</td></tr>
+      <tr><td>"XX 医院 客户画像"</td><td>同上</td></tr>
+      <tr><td>"帮我看看 XX 集团"</td><td>同上</td></tr>
+      <tr><td>"了解下 XX 银行"</td><td>同上</td></tr>
+    </tbody>
+  </table>
+
+  <blockquote>公司名说简称就行，不用全称。比如"中行徐州分行""徐州中心医院"都能识别。</blockquote>
+
+  <h3>什么时候用</h3>
+  <ul>
+    <li>第一次拜访客户前，<span class="hl">必须查</span></li>
+    <li>很久没联系的老客户，重新查一下看有什么新动态</li>
+    <li>客户提到竞争对手，查对手的底细</li>
+  </ul>
+
+  <p><strong>数据来源：</strong>小楚要查 3 个数据源（工商库、超兔 CRM、联网搜索）</p>
+
+  <!-- ===== 功能二 ===== -->
+  <h2>功能二：项目深度分析报告</h2>
+
+  <p><strong>用途：</strong>查某家客户的公开招投标信息——他们在招什么标、谁中标了、跟档案管理相关的项目有哪些。</p>
+
+  <h3>怎么问</h3>
+  <table>
+    <thead><tr><th>你说的</th><th>小楚理解</th></tr></thead>
+    <tbody>
+      <tr><td>"XX 医院 招标信息"</td><td>查该客户的招投标</td></tr>
+      <tr><td>"XX 银行 中标记录"</td><td>同上</td></tr>
+      <tr><td>"我要去拜访 XX，帮我查查招标"</td><td>同上</td></tr>
+      <tr><td>"XX 公司 项目分析"</td><td>同上</td></tr>
+    </tbody>
+  </table>
+
+  <h3>什么时候用</h3>
+  <ul>
+    <li>拜访客户前，看看他们最近有没有在招档案相关的标</li>
+    <li>跟进投标时，查历史中标记录和竞争对手</li>
+    <li>客户说要走招标流程，查他们过往的采购方式</li>
+  </ul>
+
+  <p><strong>数据来源：</strong>主要是联网搜索</p>
+
+  <!-- ===== 功能三 ===== -->
+  <h2>功能三：战略客户覆盖清单</h2>
+
+  <p><strong>用途：</strong>查看公司下发的战略客户清单，负责的客户拜访了多少、哪些还没去、哪些超期没跟进了。</p>
+
+  <h3>怎么问</h3>
+  <p>发送一个战略客户清单，等小楚回复，然后继续问：</p>
+
+  <table>
+    <thead><tr><th>你说的</th><th>小楚理解</th></tr></thead>
+    <tbody>
+      <tr><td>"战略覆盖清单完成情况"</td><td>出完整覆盖报告</td></tr>
+      <tr><td>"我哪些客户还没拜访？"</td><td>筛你的未覆盖客户</td></tr>
+      <tr><td>"南京的一级客户覆盖怎么样？"</td><td>按城市 + 级别筛</td></tr>
+      <tr><td>"XX 公司覆盖了没有？"</td><td>查单个客户状态</td></tr>
+    </tbody>
+  </table>
+
+  <!-- ===== 功能四 ===== -->
+  <h2>功能四：日程管理</h2>
+
+  <p><strong>用途：</strong>记拜访安排、查今天 / 明天有什么、确认客户回复状态。</p>
+
+  <h3>创建日程</h3>
+  <ul>
+    <li>"记一下周四上午拜访 XX 公司"</li>
+    <li>"安排明天下午电话跟进 XX 医院"</li>
+    <li>"记一下本周晚些时候去 XX 律所"</li>
+  </ul>
+
+  <h3>查看日程</h3>
+  <ul>
+    <li>"我今天有什么安排？"</li>
+    <li>"明天有什么？"</li>
+    <li>"这周日程"</li>
+  </ul>
+
+  <h3>查询状态</h3>
+  <ul>
+    <li>"XX 公司有回复了吗？"</li>
+    <li>"XX 医院确认了没有？"</li>
+  </ul>
+
+  <h3>修改 / 备注</h3>
+  <ul>
+    <li>"把 XX 公司的拜访改到周五"</li>
+    <li>"XX 医院的日程标为已完成"</li>
+    <li>"备注一下：对方说下周给答复"</li>
+  </ul>
+
+  <h3>支持的时间标签</h3>
+  <table>
+    <thead><tr><th>你说的</th><th>小楚理解</th></tr></thead>
+    <tbody>
+      <tr><td>今天 / 今天上午 / 今天下午</td><td>当天</td></tr>
+      <tr><td>明天 / 明天上午 / 明天下午</td><td>次日</td></tr>
+      <tr><td>后天</td><td>后天</td></tr>
+      <tr><td>周一 ~ 周日</td><td>最近的下一个周X</td></tr>
+      <tr><td>周四上午</td><td>最近周四的上半天</td></tr>
+      <tr><td>本周晚些时候</td><td>本周五</td></tr>
+      <tr><td>下周</td><td>下周一</td></tr>
+      <tr><td>下下周</td><td>下下周一</td></tr>
+      <tr><td>月底前</td><td>当月最后一天</td></tr>
+      <tr><td>下月</td><td>下月第一天</td></tr>
+      <tr><td>2026-07-15</td><td>指定日期</td></tr>
+    </tbody>
+  </table>
+
+  <h3>什么时候用</h3>
+  <ul>
+    <li>每天早上一上班：查今天什么安排</li>
+    <li>约好时间：随手记下来</li>
+    <li>客户给了回复：更新状态</li>
+    <li>计划下周行程的时候</li>
+  </ul>
+</section>
+
+<!-- ═════════════ 第三章：重要注意事项 ═════════════ -->
+<section class="chapter">
+  <div class="chapter-num">三 · Notice</div>
+  <h1>重要注意事项（必读）</h1>
+
+  <h2>3.1 不要反复发同一个问题</h2>
+  <ul>
+    <li><strong>画像和分析</strong>类功能需要联网搜索，需要查询时间。发一次等一会儿，小楚会回复。重复发只会打断。</li>
+    <li><strong>不要连续发"查一下 XX""再看看 YY"</strong>，等上一个结果出来再说下一个。</li>
+    <li>网络偶尔会慢，如果长时间没回复，可以联系陈洲解决。</li>
+  </ul>
+
+  <h2>3.2 查不到数据的几种情况</h2>
+  <p>不是所有公司都能查到完整信息：</p>
+  <ul>
+    <li><strong>医院、学校、事业单位、银行分行 / 支行</strong> — 这些不在企业工商库中，工商信息查不到是正常的</li>
+    <li><strong>小微企业 / 个体户</strong> — 公开信息少，联网搜索也可能查不到什么</li>
+    <li><strong>公司名太模糊</strong> — "张三家的小店"这种查不到。尽量给全称</li>
+  </ul>
+  <p>查不到的时候小楚会标注「无数据」，不是系统坏了。</p>
+
+  <h2>3.3 小楚不认识别的人</h2>
+  <ul>
+    <li>小楚只能处理<strong>你自己的日程</strong>和<strong>你权限内的客户</strong>。问别人的日程是看不到的。</li>
+    <li>每人的账号独立，数据隔离。</li>
+  </ul>
+
+  <h2>3.4 数据更新频率</h2>
+  <table>
+    <thead><tr><th>数据来源</th><th>更新频率</th></tr></thead>
+    <tbody>
+      <tr><td>超兔 CRM 数据</td><td><span class="hl">实时同步</span></td></tr>
+      <tr><td>战略覆盖清单 Excel</td><td>由销管部门定期更新。如发现数据与实际情况有出入，联系销管更新</td></tr>
+      <tr><td>联网搜索</td><td>每次查询均为实时搜索，非缓存数据</td></tr>
+    </tbody>
+  </table>
+
+  <h2>3.5 说人话就行</h2>
+  <p>不需要学特定格式，正常说话小楚都能理解：</p>
+  <table>
+    <thead><tr><th>不建议（太正式）</th><th>建议（正常说话）</th></tr></thead>
+    <tbody>
+      <tr><td>"触发客户画像功能，查询 XX 公司"</td><td>"查一下 XX 公司"</td></tr>
+      <tr><td>"执行战略覆盖统计分析"</td><td>"我哪些客户还没拜访？"</td></tr>
+      <tr><td>"创建一条日程记录"</td><td>"记一下周四去 XX 公司"</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ═════════════ 第四章：常见问题 ═════════════ -->
+<section class="chapter">
+  <div class="chapter-num">四 · FAQ</div>
+  <h1>常见问题</h1>
+
+  <h2>Q：小楚查的信息准不准？</h2>
+  <p>企业工商信息（法人、注册资本、成立日期）来自官方工商库，准确度最高。联网搜索部分来自公开网络信息，可能存在滞后或偏差，以实际拜访情况为准。</p>
+
+  <h2>Q：为什么查 XX 公司说无数据？</h2>
+  <p>可能原因：(1) 公司名太模糊或不对；(2) 该企业不在工商库中（如事业单位）；(3) 联网搜索暂时不可用。换个完整名称再试一次。</p>
+
+  <h2>Q：日程记错了 / 想改时间怎么办？</h2>
+  <p>直接说"把 XX 公司的拜访改到周五"。</p>
+
+  <h2>Q：小楚会看我发给别人的消息吗？</h2>
+  <p>不会。小楚只处理你发消息时的问题，不看聊天记录。</p>
+
+  <h2>Q：小楚出错了怎么办？</h2>
+  <p>联系管理员（陈洲）反馈问题，说明你问了什么、小楚回了什么。</p>
+</section>
+
+<!-- ═════════════ 第五章：一句话总结 ═════════════ -->
+<section class="chapter">
+  <div class="chapter-num">五 · Summary</div>
+  <h1>一句话总结</h1>
+
+  <p class="lead">以下速查表覆盖了小楚的所有核心功能，<span class="hl">看一眼就知道怎么问</span>。</p>
+
+  <table>
+    <thead><tr><th>你想干什么</th><th>就怎么说</th></tr></thead>
+    <tbody>
+      <tr><td>了解客户底细</td><td>"查一下 XX 公司"</td></tr>
+      <tr><td>查招标动态</td><td>"XX 医院 招标信息"</td></tr>
+      <tr><td>看覆盖进度</td><td>"战略覆盖清单完成情况"</td></tr>
+      <tr><td>记个安排</td><td>"记一下周四上午去 XX"</td></tr>
+      <tr><td>今天什么安排</td><td>"我今天有什么安排？"</td></tr>
+    </tbody>
+  </table>
+
+  <div class="takeaway">
+    <div class="takeaway-label">使用口诀</div>
+    <strong>等回复别急，一次一条，若长时间无回复找管理员。</strong>
+  </div>
+
+  <div class="exec-summary" style="margin-top:24pt;">
+    <h2>快速开始 CheckList</h2>
+    <ol>
+      <li>打开小楚，正常说话提问</li>
+      <li>第一次拜访客户前：查客户画像（说"查一下 XX 公司"）</li>
+      <li>有招投标需求：查项目分析（说"XX 公司 招标信息"）</li>
+      <li>管理拜访进度：查看覆盖清单（说"战略覆盖清单完成情况"）</li>
+      <li>随手记安排：说"记一下周几去 XX"</li>
+      <li>每天早上：问"今天有什么安排？"</li>
+    </ol>
+  </div>
+
+  <blockquote style="margin-top:24pt;">
+    任何技术问题、功能建议，请联系管理员 <strong>陈洲</strong>。
+    <span class="cite">— 江苏永山窍档案管理服务有限公司</span>
+  </blockquote>
+</section>
+
+</body>
+</html>

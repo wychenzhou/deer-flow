@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "wechat-article-extractor": {
+      "source": "freestylefly/wechat-article-extractor-skill",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "ba5583909f3348bd73190520064ccc90c14514ee4edbcc168ba92ff1b020d74c"
+    }
+  }
+}

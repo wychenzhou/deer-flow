@@ -11,7 +11,7 @@ import {
   useSpecificChatMode,
   useThreadChat,
 } from "@/components/workspace/chats";
-import { ExportTrigger } from "@/components/workspace/export-trigger";
+
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -20,7 +20,7 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
-import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
+
 import { Welcome } from "@/components/workspace/welcome";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -80,6 +80,7 @@ export default function ChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    regenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -159,6 +160,11 @@ export default function ChatPage() {
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
+  const handleRegenerate = useCallback(
+    (messageId: string, supersededMessageIds: string[]) =>
+      regenerateMessage(threadId, messageId, supersededMessageIds),
+    [regenerateMessage, threadId],
+  );
 
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
@@ -182,18 +188,7 @@ export default function ChatPage() {
               <ThreadTitle threadId={threadId} thread={thread} />
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <TokenUsageIndicator
-                threadId={isNewThread ? undefined : threadId}
-                backendUsage={backendTokenUsage}
-                enabled={tokenUsageEnabled}
-                messages={thread.messages}
-                pendingMessages={pendingUsageMessages}
-                preferences={localSettings.tokenUsage}
-                onPreferencesChange={(preferences) =>
-                  setLocalSettings("tokenUsage", preferences)
-                }
-              />
-              <ExportTrigger threadId={threadId} />
+
               <ArtifactTrigger />
             </div>
           </header>
@@ -208,6 +203,14 @@ export default function ChatPage() {
                 loadMoreHistory={loadMoreHistory}
                 isHistoryLoading={isHistoryLoading}
                 tokenUsageInlineMode={tokenUsageInlineMode}
+                canRegenerate={
+                  !isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                  !isUploading &&
+                  !thread.isLoading
+                }
+                onRegenerateMessage={handleRegenerate}
               />
             </div>
             <div
