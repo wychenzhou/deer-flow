@@ -37,9 +37,17 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.secret_context import redact_config_secrets
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
+
+_TERMINAL_RUN_STATUSES = {
+    RunStatus.success,
+    RunStatus.error,
+    RunStatus.timeout,
+    RunStatus.interrupted,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +69,28 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
     parts.append("")
     parts.append("")
     return "\n".join(parts)
+
+
+def _run_is_terminal(record: RunRecord) -> bool:
+    return record.status in _TERMINAL_RUN_STATUSES
+
+
+async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
+    """True when a terminal run has no retained stream on bridges that can tell."""
+    if not _run_is_terminal(record):
+        return False
+    stream_exists = getattr(bridge, "stream_exists", None)
+    if stream_exists is None:
+        return False
+    try:
+        return not bool(await stream_exists(record.run_id))
+    except Exception:
+        logger.debug(
+            "Failed to probe stream existence for terminal run %s",
+            sanitize_log_param(record.run_id),
+            exc_info=True,
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +234,41 @@ def resolve_agent_factory(assistant_id: str | None):
     return make_lead_agent
 
 
+# Lead-agent recursion budget bounds. The Gateway must NOT trust a
+# client-supplied ``recursion_limit`` verbatim: an arbitrarily large value lets
+# a single run execute unbounded LangGraph super-steps (each at least one LLM
+# call), enabling runaway API cost / DoS. ``_DEFAULT_RECURSION_LIMIT`` is the
+# server default when the client sends nothing; the hard ceiling any client
+# value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
+_DEFAULT_RECURSION_LIMIT = 100
+_DEFAULT_MAX_RECURSION_LIMIT = 1000
+
+
+def _resolve_max_recursion_limit() -> int:
+    """Resolve the clamp ceiling from ``AppConfig.max_recursion_limit``.
+
+    Falls back to ``_DEFAULT_MAX_RECURSION_LIMIT`` when the app config cannot be
+    loaded (e.g. no ``config.yaml`` in a bare unit-test environment) so that the
+    clamp still applies rather than crashing the run-config assembly.
+    """
+    try:
+        return get_app_config().max_recursion_limit
+    except Exception:
+        return _DEFAULT_MAX_RECURSION_LIMIT
+
+
+def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
+    """Clamp a client-supplied ``recursion_limit`` into a safe server range.
+
+    Non-integer values (including ``bool``, an ``int`` subclass) and non-positive
+    values fall back to ``_DEFAULT_RECURSION_LIMIT``; valid positive integers are
+    capped at ``max_limit`` (from ``AppConfig.max_recursion_limit``).
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return _DEFAULT_RECURSION_LIMIT
+    return min(value, max_limit)
+
+
 def build_run_config(
     thread_id: str,
     request_config: dict[str, Any] | None,
@@ -233,7 +298,7 @@ def build_run_config(
     # subagent inside ONE lead tools-node step, and subagents enforce their own
     # limit via `subagents.max_turns`. Do not conflate this 100 with the
     # general-purpose subagent's max_turns.
-    config: dict[str, Any] = {"recursion_limit": 100}
+    config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
@@ -255,6 +320,12 @@ def build_run_config(
                 raise ValueError("request config 'context' must be a mapping or null.")
             context["thread_id"] = thread_id
             config["context"] = context
+            # The checkpointer always scopes state by configurable["thread_id"],
+            # regardless of whether the caller drives the run via context (e.g.
+            # request-scoped secrets, #3861). thread_id comes from the URL path,
+            # not caller config, so mirror it here while keeping secret-bearing
+            # context keys out of configurable.
+            config["configurable"] = {"thread_id": thread_id}
         else:
             configurable = {"thread_id": thread_id}
             configurable.update(request_config.get("configurable", {}))
@@ -262,6 +333,22 @@ def build_run_config(
         for k, v in request_config.items():
             if k not in ("configurable", "context"):
                 config[k] = v
+        # Never trust a client-supplied recursion_limit verbatim: clamp it to a
+        # safe server range so a single run cannot execute unbounded LangGraph
+        # super-steps (runaway LLM cost / DoS). Applied after the passthrough so
+        # it overrides whatever the client sent.
+        if "recursion_limit" in request_config:
+            max_limit = _resolve_max_recursion_limit()
+            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_limit)
+            if clamped != request_config["recursion_limit"]:
+                logger.warning(
+                    "build_run_config: clamped client recursion_limit %r -> %d (max %d). thread_id=%s",
+                    request_config["recursion_limit"],
+                    clamped,
+                    max_limit,
+                    thread_id,
+                )
+            config["recursion_limit"] = clamped
     else:
         config["configurable"] = {"thread_id": thread_id}
 
@@ -425,7 +512,11 @@ async def start_run(
                 body.assistant_id,
                 on_disconnect=disconnect,
                 metadata=body.metadata or {},
-                kwargs={"input": body.input, "config": body.config},
+                # Persist a secret-redacted copy of the config: the run record is
+                # written to runs.kwargs_json and echoed by the run API, so a
+                # request-scoped secret (#3861) must not ride along. The live
+                # config built below keeps the secrets for the actual run.
+                kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
                 multitask_strategy=body.multitask_strategy,
                 model_name=model_name,
                 user_id=owner_user_id,
@@ -515,12 +606,19 @@ async def sse_consumer(
     - ``continue``: let the task run; events are discarded.
     """
     last_event_id = request.headers.get("Last-Event-ID")
+    if await _terminal_record_stream_missing(bridge, record):
+        yield format_sse("end", None)
+        return
+
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
 
             if entry is HEARTBEAT_SENTINEL:
+                if await _terminal_record_stream_missing(bridge, record):
+                    yield format_sse("end", None)
+                    return
                 yield ": heartbeat\n\n"
                 continue
 
@@ -531,7 +629,11 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        if record.status in (RunStatus.pending, RunStatus.running):
+        # store_only records are cross-worker runs hydrated from the RunStore; this
+        # worker holds no in-memory task/abort state for them, so run_mgr.cancel()
+        # cannot stop the task (it would 409). Skip on_disconnect cancellation for
+        # those and only act on runs this worker actually owns.
+        if not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -566,12 +668,18 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
+    if await _terminal_record_stream_missing(bridge, record):
+        return True
+
     try:
         async for entry in bridge.subscribe(record.run_id):
             # END_SENTINEL means the run reached a terminal state; honour it
             # even if the client just disconnected so the caller still serializes
             # the real final checkpoint.
             if entry is END_SENTINEL:
+                completed = True
+                return True
+            if entry is HEARTBEAT_SENTINEL and await _terminal_record_stream_missing(bridge, record):
                 completed = True
                 return True
             if await request.is_disconnected():

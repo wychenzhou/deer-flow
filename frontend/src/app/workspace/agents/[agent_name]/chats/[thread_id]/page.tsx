@@ -10,7 +10,8 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
-
+import { ExportTrigger } from "@/components/workspace/export-trigger";
+import { GoalStatus } from "@/components/workspace/goal-status";
 import { InputBox } from "@/components/workspace/input-box";
 import {
   MessageList,
@@ -19,8 +20,9 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
-
+import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
+import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -162,6 +164,10 @@ export default function AgentChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+    threadId,
+    thread.values.goal,
+  );
 
   return (
     <ThreadContext.Provider value={{ thread }}>
@@ -201,7 +207,18 @@ export default function AgentChatPage() {
                   <span className="hidden sm:inline">{t.agents.newChat}</span>
                 </Button>
               </Tooltip>
-
+              <TokenUsageIndicator
+                threadId={isNewThread ? undefined : threadId}
+                backendUsage={backendTokenUsage}
+                enabled={tokenUsageEnabled}
+                messages={thread.messages}
+                pendingMessages={pendingUsageMessages}
+                preferences={localSettings.tokenUsage}
+                onPreferencesChange={(preferences) =>
+                  setLocalSettings("tokenUsage", preferences)
+                }
+              />
+              <ExportTrigger threadId={threadId} />
               <ArtifactTrigger />
             </div>
           </header>
@@ -236,7 +253,7 @@ export default function AgentChatPage() {
                     : "max-w-(--container-width-md)",
                 )}
               >
-                {hasTodos && (
+                {(hasGoal || hasTodos) && (
                   <div
                     className={cn(
                       "right-0 left-0 z-0",
@@ -245,15 +262,18 @@ export default function AgentChatPage() {
                   >
                     <div
                       className={cn(
-                        "right-0 bottom-0 left-0",
+                        "right-0 bottom-0 left-0 flex flex-col",
                         isWelcomeMode ? "absolute" : "relative",
                       )}
                     >
-                      <TodoList
-                        className="bg-background/5"
-                        todos={thread.values.todos ?? []}
-                        hidden={false}
-                      />
+                      {activeGoal && <GoalStatus goal={activeGoal} />}
+                      {hasTodos && (
+                        <TodoList
+                          className="bg-background/5"
+                          todos={thread.values.todos ?? []}
+                          hidden={false}
+                        />
+                      )}
                     </div>
                   </div>
                 )}
@@ -275,7 +295,9 @@ export default function AgentChatPage() {
                   }
                   context={settings.context}
                   extraHeader={
-                    isWelcomeMode && (
+                    isWelcomeMode &&
+                    !hasGoal &&
+                    !hasTodos && (
                       <AgentWelcome agent={agent} agentName={agent_name} />
                     )
                   }
@@ -284,6 +306,7 @@ export default function AgentChatPage() {
                     isUploading
                   }
                   onContextChange={(context) => setSettings("context", context)}
+                  onGoalChange={setLocalGoal}
                   onSubmit={handleSubmit}
                   onStop={handleStop}
                 />
