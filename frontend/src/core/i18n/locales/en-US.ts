@@ -241,7 +241,7 @@ export const enUS: Translations = {
     githubTooltip: "QcdocAgent on Github",
     settingsAndMore: "Settings and more",
     visitGithub: "QcdocAgent on GitHub",
-    reportIssue: "Report a issue",
+    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About QcdocAgent",
     logout: "Log out",
