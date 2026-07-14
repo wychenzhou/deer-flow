@@ -125,12 +125,17 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 class DelegationEntry(TypedDict):
     id: str
+    run_id: NotRequired[str]
     description: str
     subagent_type: str
     status: str
     result_brief: NotRequired[str]
     result_sha256: NotRequired[str]
     result_ref: NotRequired[str]
+    # Why a guardrail cap ended the run early (#3875 Phase 2): token_capped /
+    # turn_capped / loop_capped. The status stays completed/failed; this field
+    # is the additive signal that distinguishes a capped run from a clean one.
+    stop_reason: NotRequired[str]
     created_at: str
 
 
@@ -156,6 +161,8 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
             order.append(entry_id)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
+            if previous.get("run_id") and not entry.get("run_id"):
+                entry["run_id"] = previous["run_id"]
         by_id[entry_id] = entry
     merged = [by_id[entry_id] for entry_id in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:

@@ -22,6 +22,7 @@ from app.gateway.routers import (
     features,
     feedback,
     github_webhooks,
+    input_polish,
     mcp,
     memory,
     models,
@@ -36,6 +37,7 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
@@ -187,6 +189,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError(error_msg) from e
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+
+    # Agent observability (Monocle). Off by default; enabled with
+    # MONOCLE_TRACING. Initialized here at startup — not at import time — so a
+    # plain `import deerflow.agents` never installs a process-global tracer.
+    # Unlike LangSmith/Langfuse, whose validation failures abort the agent run,
+    # a bad Monocle config only logs: the Gateway keeps serving without tracing.
+    try:
+        setup_monocle_tracing_if_enabled()
+    except Exception:  # observability must never break startup
+        logger.exception("Monocle tracing setup failed; continuing without it")
 
     # Pre-warm tiktoken encoding cache so the first memory-injection request
     # never blocks on the BPE data download (which hits an OpenAI/Azure URL
@@ -363,6 +375,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
                 "description": "Generate follow-up question suggestions for conversations",
             },
             {
+                "name": "input-polish",
+                "description": "Polish composer draft input before sending",
+            },
+            {
                 "name": "channels",
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
@@ -444,6 +460,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Input polishing API is mounted at /api/input-polish
+    app.include_router(input_polish.router)
 
     # User-facing IM channel connection API is mounted at /api/channels
     app.include_router(channel_connections.router)
