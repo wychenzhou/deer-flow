@@ -830,7 +830,7 @@ export const enUS: Translations = {
     passwordPlaceholder: "•••••••",
     rememberMe: "Keep me signed in",
     rememberMeDescription:
-      "Keep this browser session when possible. DeerFlow stores only your email, never your password.",
+      "Keep this browser session when possible. QcdocAgent stores only your email, never your password.",
     pleaseWait: "Please wait...",
     signIn: "Sign In",
     createAccount: "Create Account",

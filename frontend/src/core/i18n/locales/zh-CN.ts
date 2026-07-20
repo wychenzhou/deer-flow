@@ -799,7 +799,7 @@ export const zhCN: Translations = {
     passwordPlaceholder: "•••••••",
     rememberMe: "保持登录",
     rememberMeDescription:
-      "下次打开 DeerFlow 时尽量保持当前会话，仅保存邮箱，不保存密码。",
+      "下次打开 QcdocAgent 时尽量保持当前会话，仅保存邮箱，不保存密码。",
     pleaseWait: "请稍候...",
     signIn: "登录",
     createAccount: "创建账号",
