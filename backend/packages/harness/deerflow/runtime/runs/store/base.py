@@ -29,6 +29,7 @@ class RunStore(abc.ABC):
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
@@ -54,6 +55,29 @@ class RunStore(abc.ABC):
     ) -> list[dict[str, Any]]:
         pass
 
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> set[str]:
+        """Return source run IDs superseded by successful regenerations.
+
+        Implementations must inspect the complete thread and must not apply the
+        normal bounded run-list limit.
+        """
+        raise NotImplementedError
+
+    async def get_many_by_thread(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Batch-load selected runs belonging to one thread."""
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def update_status(
         self,
@@ -61,6 +85,7 @@ class RunStore(abc.ABC):
         status: str,
         *,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool | None:
         """Update a run status.
 

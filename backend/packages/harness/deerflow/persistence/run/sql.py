@@ -96,6 +96,7 @@ class RunRepository(RunStore):
         metadata=None,
         kwargs=None,
         error=None,
+        stop_reason: str | None = None,
         created_at=None,
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
@@ -121,6 +122,7 @@ class RunRepository(RunStore):
             "metadata_json": self._safe_json(metadata) or {},
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
+            "stop_reason": stop_reason,
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
@@ -166,10 +168,49 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def update_status(self, run_id, status, *, error=None) -> bool:
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_successful_regenerate_sources")
+        source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
+        stmt = select(source).where(
+            RunRow.thread_id == thread_id,
+            RunRow.status == "success",
+            source.is_not(None),
+            source != "",
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {value for value in result.scalars() if isinstance(value, str) and value}
+
+    async def get_many_by_thread(
+        self,
+        thread_id,
+        run_ids,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
+        stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_id.in_(run_ids))
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
+
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
         # Guard: only transition rows that are still active. ``interrupted`` is
         # included because the rollback path goes ``running → interrupted``
         # (cancel acknowledged) then ``interrupted → error`` (task finalize).

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
@@ -180,6 +181,7 @@ class RunRecord:
     finalizing: bool = False
     owner_worker_id: str | None = None
     lease_expires_at: str | None = None
+    stop_reason: str | None = None
 
 
 class RunManager:
@@ -243,7 +245,7 @@ class RunManager:
         return [record for run_id in run_ids if (record := self._runs.get(run_id)) is not None]
 
     @staticmethod
-    def _store_put_payload(record: RunRecord, *, error: str | None = None) -> dict[str, Any]:
+    def _store_put_payload(record: RunRecord, *, error: str | None = None, stop_reason: str | None = None) -> dict[str, Any]:
         payload = {
             "thread_id": record.thread_id,
             "assistant_id": record.assistant_id,
@@ -259,6 +261,8 @@ class RunManager:
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
+        if record.stop_reason is not None:
+            payload["stop_reason"] = record.stop_reason
         return payload
 
     async def _call_store_with_retry(
@@ -330,16 +334,16 @@ class RunManager:
             self._store_put_payload(record, error=error),
         )
 
-    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None) -> bool:
+    async def _persist_status(self, record: RunRecord, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> bool:
         """Best-effort persist a status transition to the backing store."""
         if self._store is None:
             return True
-        row_recovery_payload = self._store_put_payload(record, error=error)
+        row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         try:
             updated = await self._call_store_with_retry(
                 "update_status",
                 record.run_id,
-                lambda: self._store.update_status(record.run_id, status.value, error=error),
+                lambda: self._store.update_status(record.run_id, status.value, error=error, stop_reason=stop_reason),
             )
             if updated is False:
                 # ``update_status`` is now guarded by ``status IN ('pending','running')``.
@@ -406,6 +410,7 @@ class RunManager:
             first_human_message=row.get("first_human_message"),
             owner_worker_id=row.get("owner_worker_id"),
             lease_expires_at=row.get("lease_expires_at"),
+            stop_reason=row.get("stop_reason"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -590,7 +595,72 @@ class RunManager:
                     logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
         return sorted(records_by_id.values(), key=lambda record: record.created_at, reverse=True)[:limit]
 
-    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None) -> None:
+    async def list_successful_regenerate_sources(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> set[str]:
+        """Return all source runs superseded by successful regenerations.
+
+        Unlike :meth:`list_by_thread`, this query is intentionally unbounded.
+        Current-process records override matching persisted status: a latest
+        in-memory failure must not inherit an older successful store snapshot.
+        Store failures propagate because supersession filtering is required for
+        correct pagination.
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_successful_regenerate_sources")
+        async with self._lock:
+            memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+
+        sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
+        # _thread_records_locked preserves the insertion order of the thread
+        # index. Applying records oldest-to-newest makes the latest in-memory
+        # regeneration attempt authoritative when several attempts reference
+        # the same source run (for example, a failed retry after a success).
+        for record in memory_records:
+            source = record.metadata.get("regenerate_from_run_id")
+            if not isinstance(source, str) or not source:
+                continue
+            sources.discard(source)
+            if record.status == RunStatus.success:
+                sources.add(source)
+        return sources
+
+    async def get_many_by_thread(
+        self,
+        thread_id: str,
+        run_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, RunRecord]:
+        """Batch-load selected thread runs with in-memory records preferred."""
+        if not run_ids:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
+        async with self._lock:
+            records_by_id = {record.run_id: record for record in self._thread_records_locked(thread_id) if record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)}
+        if self._store is None:
+            return records_by_id
+
+        remaining = run_ids - records_by_id.keys()
+        if not remaining:
+            return records_by_id
+        try:
+            rows = await self._store.get_many_by_thread(thread_id, set(remaining), user_id=resolved_user_id)
+        except Exception:
+            logger.warning("Failed to batch-hydrate runs for thread %s", thread_id, exc_info=True)
+            return records_by_id
+        for run_id, row in rows.items():
+            if run_id in records_by_id:
+                continue
+            try:
+                records_by_id[run_id] = self._record_from_store(row)
+            except Exception:
+                logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
+        return records_by_id
+
+    async def set_status(self, run_id: str, status: RunStatus, *, error: str | None = None, stop_reason: str | None = None) -> None:
         """Transition a run to a new status."""
         async with self._lock:
             record = self._runs.get(run_id)
@@ -601,7 +671,9 @@ class RunManager:
             record.updated_at = _now_iso()
             if error is not None:
                 record.error = error
-        await self._persist_status(record, status, error=error)
+            if stop_reason is not None:
+                record.stop_reason = stop_reason
+        await self._persist_status(record, status, error=error, stop_reason=stop_reason)
         logger.info("Run %s -> %s", run_id, status.value)
 
     async def set_finalizing(self, run_id: str, finalizing: bool) -> None:
