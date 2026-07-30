@@ -17,6 +17,7 @@ from deerflow.config.authorization_config import AuthorizationConfig, load_autho
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
@@ -296,6 +297,13 @@ class AppConfig(BaseModel):
             field_doc="Run ownership and lease configuration for multi-worker deployments.",
         ),
     )
+    dedupe_storage: DedupeStorageConfig = Field(
+        default_factory=DedupeStorageConfig,
+        description=format_field_description(
+            "dedupe_storage",
+            field_doc="Inbound webhook dedupe storage backend (memory / postgres / auto) for cross-pod redelivery dedup. See issue #4120.",
+        ),
+    )
 
     # Name -> config lookup tables, (re)built after validation by
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
@@ -438,6 +446,16 @@ class AppConfig(BaseModel):
         if previous_checkpointer_config != config.checkpointer:
             # These runtime singletons derive their backend from checkpointer config.
             # Keep imports local to avoid cycles: both providers import get_app_config.
+            #
+            # The unified ``database`` section is intentionally NOT handled here.
+            # ``database`` is a restart-required field (reload_boundary.STARTUP_ONLY_FIELDS):
+            # ``init_engine_from_config()`` builds the ORM engine once at startup and
+            # never rebuilds it on a config.yaml edit. Resetting only the sync
+            # checkpointer/store singletons on a live ``database``/``postgres_schema``
+            # change would half-migrate the deployment -- new checkpoint/store tables
+            # would land in the new schema while ORM rows keep landing in the old one,
+            # with no error surfaced. Requiring the documented restart keeps the
+            # deployment self-consistent.
             from deerflow.runtime.checkpointer import reset_checkpointer
             from deerflow.runtime.store import reset_store
 

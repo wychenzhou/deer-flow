@@ -11,7 +11,8 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
@@ -33,6 +34,7 @@ from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
+from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
@@ -40,10 +42,13 @@ from deerflow.runtime import (
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
+    RunContext,
     RunManager,
     RunRecord,
     RunStatus,
     StreamBridge,
+    StreamGap,
+    ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
     run_agent,
@@ -57,12 +62,35 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.secret_context import redact_config_secrets
+from deerflow.runtime.secret_context import (
+    LegacyRunMetadataSecretError,
+    redact_config_secrets,
+    validate_run_metadata_secrets,
+)
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def reserve_checkpoint_write(
+    request: Request,
+    thread_id: str,
+    *,
+    user_id: str | None = None,
+) -> AsyncIterator[None]:
+    """Serialize an out-of-run checkpoint writer against all thread operations."""
+    run_manager = get_run_manager(request)
+    async with goal_thread_lock(thread_id):
+        async with run_manager.reserve_thread_operation(
+            thread_id,
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id=user_id,
+        ):
+            yield
+
 
 _TERMINAL_RUN_STATUSES = {
     RunStatus.success,
@@ -70,6 +98,8 @@ _TERMINAL_RUN_STATUSES = {
     RunStatus.timeout,
     RunStatus.interrupted,
 }
+
+_THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
     {
@@ -103,6 +133,51 @@ def format_sse(event: str, data: Any, *, event_id: str | None = None) -> str:
 
 def _run_is_terminal(record: RunRecord) -> bool:
     return record.status in _TERMINAL_RUN_STATUSES
+
+
+def _consume_task_result(task: asyncio.Task) -> None:
+    """Retrieve a detached task's exception without propagating cancellation."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> None:
+    """Log detached metadata setup failures while ignoring cancellation."""
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.warning(
+            "Failed to ensure thread_meta for %s after worker detached (non-fatal)",
+            sanitize_log_param(thread_id),
+            exc_info=True,
+        )
+
+
+async def _ensure_thread_metadata(
+    run_ctx: RunContext,
+    record: RunRecord,
+    *,
+    owner_user_id: str | None,
+) -> None:
+    """Ensure an admitted run's thread exists without delaying task attachment."""
+    thread_store = run_ctx.thread_store
+    existing = await thread_store.get(record.thread_id)
+    if existing is None and owner_user_id:
+        unscoped = await thread_store.get(record.thread_id, user_id=None)
+        if unscoped is not None:
+            if unscoped.get("user_id") != owner_user_id:
+                await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
+            existing = await thread_store.get(record.thread_id)
+    if existing is None:
+        await thread_store.create(
+            record.thread_id,
+            assistant_id=record.assistant_id,
+            metadata=record.metadata,
+        )
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -233,12 +308,21 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
 # Server-owned authorization identity fields. These must never be accepted from
 # client-supplied ``body.config.context`` or ``body.config.configurable``. They
-# are either produced by Gateway auth state or admitted from a separately
-# authenticated internal request channel.
-#   ``is_internal``       — derived from ``request.state.auth_source``
-#   ``authz_attributes`` — Phase 1A has no Gateway-side producer; always cleared.
-#   ``channel_user_id``  — accepted only from trusted internal ``body.context``.
-_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset({"is_internal", "authz_attributes", "channel_user_id"})
+# are either produced by Gateway auth state, admitted from a separately
+# authenticated internal request channel, or reserved for LangGraph Server.
+#   ``is_internal``             — derived from ``request.state.auth_source``
+#   ``authz_attributes``        — Phase 1A has no Gateway-side producer; cleared.
+#   ``channel_user_id``         — accepted only from trusted internal context.
+#   ``langgraph_auth_user*``    — populated only by LangGraph Server auth.
+_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {
+        "is_internal",
+        "authz_attributes",
+        "channel_user_id",
+        "langgraph_auth_user",
+        "langgraph_auth_user_id",
+    }
+)
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
@@ -607,23 +691,35 @@ def build_checkpoint_state_mutation_accessor(
 # Cache of factory-built accessor graphs. Accessor operations (aget_state /
 # aupdate_state) never execute graph nodes or middleware, so per-request
 # variations (user, model, skills) cannot affect materialization semantics;
-# the compiled graph is stable per (assistant_id, mode, app_config). The
+# the compiled graph is stable per (assistant_id, mode, snapshot_frequency,
+# app_config). The
 # factory and app_config identities are re-validated on every call so patched
 # factories take effect immediately and a config.yaml hot-reload (which
 # rebuilds the AppConfig object) never serves a stale compiled graph — the
 # cached reference keeps the old config alive, so id-reuse cannot produce a
-# false hit. Bounded: cleared when too many distinct assistants appear.
+# false hit. Bounded: cleared when too many distinct assistants appear. The
+# cap is configurable (database.checkpoint_graph_cache.accessor_graph_max)
+# and re-read on every eviction check, so a hot-reload takes effect without
+# a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
-_state_accessor_graph_cache: dict[tuple[str | None, str], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
 
 
-def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, config: dict[str, Any]) -> Any:
+def _accessor_graph_cache_max(app_config: Any) -> int:
+    return resolve_checkpoint_graph_cache_max(
+        getattr(app_config, "database", None),
+        "accessor_graph_max",
+        _STATE_ACCESSOR_GRAPH_CACHE_MAX,
+    )
+
+
+def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
     app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode)
+    key = (assistant_id, mode, snapshot_frequency)
     cached = _state_accessor_graph_cache.get(key)
     if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
         return cached[2]
-    if len(_state_accessor_graph_cache) >= _STATE_ACCESSOR_GRAPH_CACHE_MAX:
+    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
         _state_accessor_graph_cache.clear()
     graph = agent_factory(config=config)
     _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
@@ -728,7 +824,7 @@ def build_checkpoint_state_accessor(
 
     agent_factory = resolve_agent_factory(assistant_id)
     try:
-        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, config)
+        graph = _state_accessor_graph(agent_factory, assistant_id, ctx.checkpoint_channel_mode, getattr(ctx, "checkpoint_snapshot_frequency", None), config)
     except Exception:
         if ctx.checkpoint_channel_mode != "full":
             # Delta materialization needs the graph's channel table; there is
@@ -908,6 +1004,14 @@ async def start_run(
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
     """
+    body_config = getattr(body, "config", None)
+    config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
+    try:
+        validate_run_metadata_secrets(getattr(body, "metadata", None))
+        validate_run_metadata_secrets(config_metadata)
+    except LegacyRunMetadataSecretError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -917,7 +1021,6 @@ async def start_run(
 
     body_context = getattr(body, "context", None) or {}
     model_name = body_context.get("model_name")
-
     # Coerce non-string model_name values to str before truncation.
     if model_name is not None and not isinstance(model_name, str):
         model_name = str(model_name)
@@ -958,49 +1061,6 @@ async def start_run(
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
-        try:
-            async with goal_thread_lock(thread_id):
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=body.metadata or {},
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built below keeps the secrets for the actual run.
-                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                )
-        except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except UnsupportedStrategyError as exc:
-            raise HTTPException(status_code=501, detail=str(exc)) from exc
-
-        # Upsert thread metadata so the thread appears in /threads/search,
-        # even for threads that were never explicitly created via POST /threads
-        # (e.g. stateless runs).
-        try:
-            existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None and owner_user_id:
-                unscoped_existing = await run_ctx.thread_store.get(thread_id, user_id=None)
-                if unscoped_existing is not None:
-                    if unscoped_existing.get("user_id") != owner_user_id:
-                        await run_ctx.thread_store.update_owner(thread_id, owner_user_id, user_id=None)
-                    existing = await run_ctx.thread_store.get(thread_id)
-            if existing is None:
-                await run_ctx.thread_store.create(
-                    thread_id,
-                    assistant_id=body.assistant_id,
-                    metadata=body.metadata,
-                )
-            else:
-                await run_ctx.thread_store.update_status(thread_id, "running")
-        except Exception:
-            logger.warning("Failed to upsert thread_meta for %s (non-fatal)", sanitize_log_param(thread_id))
-
         agent_factory = resolve_agent_factory(body.assistant_id)
         is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
         command = getattr(body, "command", None)
@@ -1028,8 +1088,59 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
-        task = asyncio.create_task(
-            run_agent(
+        async def run_after_metadata(record: RunRecord) -> None:
+            metadata_task = asyncio.create_task(
+                _ensure_thread_metadata(
+                    run_ctx,
+                    record,
+                    owner_user_id=owner_user_id,
+                )
+            )
+            abort_task = asyncio.create_task(record.abort_event.wait())
+            metadata_failure_logged = False
+            try:
+                done, _ = await asyncio.wait(
+                    (metadata_task, abort_task),
+                    timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if metadata_task in done:
+                    try:
+                        metadata_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        metadata_failure_logged = True
+                        logger.warning(
+                            "Failed to ensure thread_meta for %s (non-fatal)",
+                            sanitize_log_param(thread_id),
+                            exc_info=True,
+                        )
+                elif abort_task not in done:
+                    logger.warning(
+                        "Timed out ensuring thread_meta for %s after %.1fs",
+                        sanitize_log_param(thread_id),
+                        _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+                    )
+            finally:
+                if metadata_task.done():
+                    if not metadata_failure_logged:
+                        _log_thread_metadata_task_result(metadata_task, thread_id=thread_id)
+                else:
+                    metadata_task.cancel()
+                    metadata_task.add_done_callback(
+                        lambda task: _log_thread_metadata_task_result(
+                            task,
+                            thread_id=thread_id,
+                        )
+                    )
+                if not abort_task.done():
+                    abort_task.cancel()
+                    abort_task.add_done_callback(_consume_task_result)
+            # Continue through run_agent even after metadata abort/timeout:
+            # its startup barrier is the single path that turns pending
+            # cancellation into no-agent-construction plus publish_end.
+            await run_agent(
                 bridge,
                 run_mgr,
                 record,
@@ -1042,8 +1153,43 @@ async def start_run(
                 interrupt_before=body.interrupt_before,
                 interrupt_after=body.interrupt_after,
             )
-        )
-        record.task = task
+
+        try:
+            async with goal_thread_lock(thread_id):
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=body.metadata or {},
+                    # Persist a secret-redacted copy of the config: the run record is
+                    # written to runs.kwargs_json and echoed by the run API, so a
+                    # request-scoped secret (#3861) must not ride along. The live
+                    # config built above keeps the secrets for the actual run.
+                    kwargs={"input": body.input, "config": redact_config_secrets(body.config)},
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                )
+
+                worker = run_after_metadata(record)
+                try:
+                    # No await is allowed between durable admission and task
+                    # attachment. Metadata setup runs inside the attached
+                    # worker so a pending cancellation can bypass stalled
+                    # thread-store IO and still reach run_agent's startup
+                    # barrier / stream finalization.
+                    record.task = asyncio.create_task(worker)
+                except Exception as exc:
+                    worker.close()
+                    await run_mgr.fail_start_if_pending(
+                        record.run_id,
+                        error=f"Failed to attach run worker: {exc}",
+                    )
+                    raise
+        except ConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except UnsupportedStrategyError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
 
         # Title sync is handled by worker.py's finally block which reads the
         # title from the checkpoint and calls thread_store.update_display_name
@@ -1124,10 +1270,26 @@ async def sse_consumer(
         yield format_sse("end", None)
         return
 
+    gap_emitted = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
                 break
+
+            if isinstance(entry, StreamGap):
+                gap_emitted = True
+                yield format_sse(
+                    "gap",
+                    {
+                        "code": "stream_replay_gap",
+                        "run_id": record.run_id,
+                        "requested_event_id": entry.requested_event_id,
+                        "earliest_available_event_id": entry.earliest_available_event_id,
+                        "latest_available_event_id": entry.latest_available_event_id,
+                        "recovery": "reload_durable_state",
+                    },
+                )
+                return
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
@@ -1143,11 +1305,11 @@ async def sse_consumer(
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
     finally:
-        # store_only records are cross-worker runs hydrated from the RunStore; this
-        # worker holds no in-memory task/abort state for them, so run_mgr.cancel()
-        # cannot stop the task (it would 409). Skip on_disconnect cancellation for
-        # those and only act on runs this worker actually owns.
-        if not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        # store_only records are cross-worker observation handles. An explicit
+        # cancel-then-stream action has already persisted its request before
+        # subscribing; a plain join disconnect must not invent a new
+        # cancellation request. Only apply on_disconnect to locally-owned runs.
+        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -1185,21 +1347,32 @@ async def wait_for_run_completion(
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
+    resume_from_event_id: str | None = None
     try:
-        async for entry in bridge.subscribe(record.run_id):
-            # END_SENTINEL means the run reached a terminal state; honour it
-            # even if the client just disconnected so the caller still serializes
-            # the real final checkpoint.
-            if entry is END_SENTINEL:
-                completed = True
-                return True
-            if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
-                completed = True
-                return True
-            if await request.is_disconnected():
-                break
-            # Heartbeats and regular events: keep waiting for END_SENTINEL.
-        return completed
+        while True:
+            gap_seen = False
+            async for entry in bridge.subscribe(record.run_id, last_event_id=resume_from_event_id):
+                # END_SENTINEL means the run reached a terminal state; honour it
+                # even if the client just disconnected so the caller still serializes
+                # the real final checkpoint.
+                if entry is END_SENTINEL:
+                    completed = True
+                    return True
+                if isinstance(entry, StreamGap):
+                    # The wait API only needs terminal completion, not a complete
+                    # event replay. Resume at the retained tail rather than
+                    # treating a bridge gap as a client disconnect.
+                    resume_from_event_id = entry.latest_available_event_id
+                    gap_seen = True
+                    break
+                if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    completed = True
+                    return True
+                if await request.is_disconnected():
+                    return False
+                # Heartbeats and regular events: keep waiting for END_SENTINEL.
+            if not gap_seen:
+                return completed
     finally:
         if not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
