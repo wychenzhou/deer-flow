@@ -2,6 +2,9 @@
 
 本文档汇总了本项目所有可用的启动方式，覆盖本地开发、Docker 部署、以及单独启动各个服务。
 
+> **说明**：本指南不使用 `make` 命令，全部为传统命令行方式。
+> 若机器上没有安装 `make`，或遇到 `make` 无法运行的环境（如部分 Windows 环境），请按本指南操作。
+
 ---
 
 ## 1. 一键启动（推荐本地开发）
@@ -10,18 +13,23 @@
 
 ```bash
 # 开发模式（带热重载）
-make dev
+./scripts/serve.sh --dev
 
 # 生产模式（预构建，无热重载）
-make start
+./scripts/serve.sh --prod
 
 # 后台运行
-make dev-daemon
-make start-daemon
+./scripts/serve.sh --dev --daemon
+./scripts/serve.sh --prod --daemon
 
 # 停止所有服务
-make stop
+./scripts/serve.sh --stop
 ```
+
+> 在 Windows 的 cmd / PowerShell 下请改用：
+> ```bat
+> call scripts\run-with-git-bash.cmd ./scripts/serve.sh --dev
+> ```
 
 这会同时启动：
 - **Gateway** (后端 API) → http://localhost:8001
@@ -53,32 +61,33 @@ DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://localhost:8001
 DEER_FLOW_TRUSTED_ORIGINS=http://localhost:3000,http://localhost:2026
 ```
 
+> 若 `pnpm` 命令不可用，可使用 Corepack 托管的版本：
+> `corepack pnpm dev`（前提是按项目的 `packageManager` 字段启用了 Corepack）。
+
 ### 2.2 后端（Backend）
 
 ```bash
 cd backend
 
 # 开发模式（热重载）
-make dev
+PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
 
-# 生产模式
-make gateway
+# 生产模式（无热重载）
+PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
 
 # 仅安装依赖
-make install       # 等价于 uv sync
+uv sync
 
 # 测试
-make test
-make test-blocking-io
+PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" tests/ -v
+PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
 
 # 代码检查
-make lint
-make format
-```
+uv run ruff check .
+uv run ruff format --check .
 
-实际执行的命令：
-```bash
-PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload
+# 代码格式化
+uv run ruff check . --fix && uv run ruff format .
 ```
 
 ### 2.3 Nginx（仅代理，前后端已在运行）
@@ -106,21 +115,26 @@ docker restart deer-flow-nginx   # 重启
 
 ```bash
 # 初始化（拉取 sandbox 镜像）
-make docker-init
+./scripts/docker.sh init
 
 # 启动所有 Docker 服务（frontend + gateway + nginx + 可选 provisioner）
-make docker-start
+./scripts/docker.sh start
 
 # 查看日志
-make docker-logs
-make docker-logs-frontend
-make docker-logs-gateway
+./scripts/docker.sh logs
+./scripts/docker.sh logs --frontend
+./scripts/docker.sh logs --gateway
 
 # 停止
-make docker-stop
+./scripts/docker.sh stop
 ```
 
-底层命令：
+> 在 Windows 的 cmd / PowerShell 下请改用：
+> ```bat
+> call scripts\run-with-git-bash.cmd ./scripts/docker.sh start
+> ```
+
+底层命令（手动等价）：
 ```bash
 cd docker
 docker compose -p deer-flow-dev -f docker-compose-dev.yaml up --build -d
@@ -146,8 +160,11 @@ docker compose -p deer-flow-dev -f docker-compose-dev.yaml up --build -d
 ## 5. 环境依赖检查
 
 ```bash
-make check       # 检查系统工具是否齐全
-make doctor      # 诊断配置问题
+# 检查系统工具是否齐全
+python ./scripts/check.py
+
+# 诊断配置问题
+cd backend && uv run python ../scripts/doctor.py
 ```
 
 必需工具：
@@ -167,9 +184,14 @@ make doctor      # 诊断配置问题
 
 初始化配置：
 ```bash
-make setup       # 交互式配置向导
-make config      # 从 example 生成 config.yaml
-make config-upgrade  # 合并新版配置字段
+# 交互式配置向导
+cd backend && uv run python ../scripts/setup_wizard.py
+
+# 从 example 生成 config.yaml（已存在则中止）
+python ./scripts/configure.py
+
+# 合并新版配置字段（Git Bash）
+./scripts/config-upgrade.sh
 ```
 
 ---
@@ -178,18 +200,20 @@ make config-upgrade  # 合并新版配置字段
 
 ```bash
 # 根目录
-make install     # 安装前后端依赖
-make dev         # 启动全部服务（开发）
-make stop        # 停止全部服务
+python ./scripts/check.py        # 检查系统依赖
+./scripts/serve.sh --dev         # 启动全部服务（开发）
+./scripts/serve.sh --stop        # 停止全部服务
 
 # backend 目录
-make dev         # Gateway dev + 热重载
-make gateway     # Gateway 生产模式
-make test        # 运行测试
+cd backend
+uv sync                          # 安装依赖
+PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --reload   # Gateway dev + 热重载
+PYTHONPATH=. uv run pytest -m "not live" tests/ -v                                    # 运行测试
 
 # frontend 目录
+cd frontend
 pnpm dev         # Next.js dev + Turbopack
 pnpm build       # 生产构建
 pnpm check       # ESLint + TypeCheck
-pnpm test        # Vitest
+pnpm test        # 单元测试
 ```
