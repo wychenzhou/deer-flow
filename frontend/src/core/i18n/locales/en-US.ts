@@ -913,12 +913,12 @@ export const enUS: Translations = {
         connectionStarted: "Connection link opened",
         connectionReady: "Connection is ready. Opening authorization...",
         authStarted:
-          "Authorization page opened. DeerFlow will detect completion automatically.",
+          "Authorization page opened. QcdocAgent will detect completion automatically.",
         authorizationStillPending:
-          'Authorization is not complete yet. Finish it in the browser; DeerFlow keeps checking automatically. You can click "I completed authorization" if the page does not update.',
+          'Authorization is not complete yet. Finish it in the browser; QcdocAgent keeps checking automatically. You can click "I completed authorization" if the page does not update.',
         permissionTitle: "Authorization scope",
         permissionDescription:
-          "By default, DeerFlow only completes the base sign-in and does not request any business permissions. Select the domains you need here; connected users can re-authorize to add more (scopes accumulate).",
+          "By default, QcdocAgent only completes the base sign-in and does not request any business permissions. Select the domains you need here; connected users can re-authorize to add more (scopes accumulate).",
         authDomains: {
           calendar: {
             label: "Calendar",
@@ -1029,10 +1029,10 @@ export const enUS: Translations = {
           "The first connection needs one browser confirmation from Lark. Open the link below and finish the prompt, then return here to continue authorization.",
         openAuthLinkTitle: "Authorize Lark in your browser",
         openAuthLinkDescription:
-          "Open the link below to authorize. DeerFlow keeps checking automatically and will save the connection after approval.",
+          "Open the link below to authorize. QcdocAgent keeps checking automatically and will save the connection after approval.",
         waitingAuthTitle: "Waiting for Lark authorization",
         waitingAuthDescription:
-          "Finish authorization in the browser page that just opened. DeerFlow will update this panel automatically; the button below is only a fallback.",
+          "Finish authorization in the browser page that just opened. QcdocAgent will update this panel automatically; the button below is only a fallback.",
         openAuthLink: "Open link",
         copyAuthLink: "Copy link",
         completeAuth: "I completed authorization",
@@ -1058,7 +1058,7 @@ export const enUS: Translations = {
           "The current user's authorization was verified with Lark during this connection flow. Reconnect whenever you need to refresh it or add permissions.",
         authNextTitle: "Complete browser authorization next",
         authNextDescription:
-          "Click “Connect Lark”; DeerFlow checks the current status first and opens browser authorization only when disconnected or expired.",
+          "Click “Connect Lark”; QcdocAgent checks the current status first and opens browser authorization only when disconnected or expired.",
       },
     },
     skills: {

@@ -874,9 +874,9 @@ export const zhCN: Translations = {
           "飞书已连接，无需重复授权。如果授权已过期，刷新状态后可重新连接。",
         connectionStarted: "连接链接已打开",
         connectionReady: "连接准备已完成，正在打开授权链接",
-        authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",
+        authStarted: "授权页已打开，QcdocAgent 会自动检测授权结果。",
         authorizationStillPending:
-          "还没有检测到授权完成。请在浏览器完成授权；DeerFlow 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
+          "还没有检测到授权完成。请在浏览器完成授权；QcdocAgent 会继续自动检测。如果页面没有更新，可点击“我已完成授权”。",
         permissionTitle: "授权范围",
         permissionDescription:
           "默认只完成基础登录，不会申请任何业务权限。按需在这里勾选要授权的业务域；已连接用户可以重新授权继续追加（scope 会累积）。",
@@ -980,10 +980,10 @@ export const zhCN: Translations = {
           "首次连接需要在浏览器里完成一次飞书确认。打开下面的链接按提示完成；完成后回到这里继续授权。",
         openAuthLinkTitle: "在浏览器中完成飞书授权",
         openAuthLinkDescription:
-          "打开下面的链接完成授权。DeerFlow 会持续自动检测，并在授权通过后保存连接状态。",
+          "打开下面的链接完成授权。QcdocAgent 会持续自动检测，并在授权通过后保存连接状态。",
         waitingAuthTitle: "等待飞书授权完成",
         waitingAuthDescription:
-          "请在刚打开的浏览器页面完成授权。DeerFlow 会自动更新这里的状态；下方按钮只是兜底操作。",
+          "请在刚打开的浏览器页面完成授权。QcdocAgent 会自动更新这里的状态；下方按钮只是兜底操作。",
         openAuthLink: "打开链接",
         copyAuthLink: "复制链接",
         completeAuth: "我已完成授权",
@@ -1008,7 +1008,7 @@ export const zhCN: Translations = {
           "本次连接流程已向飞书验证当前用户授权。需要刷新授权或追加权限时，可重新连接。",
         authNextTitle: "下一步完成浏览器授权",
         authNextDescription:
-          "点击“连接飞书”后，DeerFlow 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
+          "点击“连接飞书”后，QcdocAgent 会先检查当前状态；未连接或授权过期时会拉起浏览器授权。",
       },
     },
     skills: {
