@@ -4,12 +4,12 @@
 
 用法:
     # 使用 LangGraph API (推荐)
-    python scripts/get_chat_history.py <thread_id>
-    python scripts/get_chat_history.py <thread_id> --limit 10
-    python scripts/get_chat_history.py <thread_id> --json
+    python docs-local/scripts/get_chat_history.py <thread_id>
+    python docs-local/scripts/get_chat_history.py <thread_id> --limit 10
+    python docs-local/scripts/get_chat_history.py <thread_id> --json
 
     # 直接查询数据库
-    python scripts/get_chat_history.py <thread_id> --direct
+    python docs-local/scripts/get_chat_history.py <thread_id> --direct
 """
 
 import asyncio
