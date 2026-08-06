@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared import (
+from skills.public.kami.scripts.shared import (
     COOL_GRAY_BLOCKLIST,
     DIAGRAMS,
     HTML_TEMPLATES,
@@ -26,7 +26,7 @@ from shared import (
     TEMPLATES,
     TOKENS_FILE,
 )
-from tokens import CSS_VAR, ROOT_BLOCK
+from skills.public.kami.scripts.tokens import CSS_VAR, ROOT_BLOCK
 
 # Font-stack vars legitimately differ between a base template and its locale
 # variants (-en, -ko); every other :root var must match across the pair.

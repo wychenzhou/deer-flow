@@ -12,13 +12,13 @@ import re
 import subprocess
 from pathlib import Path
 
-from highlight import highlight_code_blocks
-from optional_deps import (
+from skills.public.kami.scripts.highlight import highlight_code_blocks
+from skills.public.kami.scripts.optional_deps import (
     MissingDepError,
     require_pypdf_reader,
     require_weasyprint_html,
 )
-from shared import DIAGRAMS, EXAMPLES, TEMPLATES, load_checks_thresholds
+from skills.public.kami.scripts.shared import DIAGRAMS, EXAMPLES, TEMPLATES, load_checks_thresholds
 
 # Primary fonts expected in embedded PDF font names
 CN_PRIMARY_FONTS = {"TsangerJinKai02"}

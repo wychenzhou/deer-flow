@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from shared import DIAGRAMS, ROOT, TEMPLATES, TOKENS_FILE
+from skills.public.kami.scripts.shared import DIAGRAMS, ROOT, TEMPLATES, TOKENS_FILE
 
 ROOT_BLOCK = re.compile(r":root\s*\{([^}]*)\}", re.DOTALL)
 CSS_VAR = re.compile(r"--([\w-]+)\s*:\s*([^;]+);")

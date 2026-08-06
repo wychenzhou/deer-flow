@@ -51,7 +51,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-import attendance_report_common as cmn
+import skills.public.dws.scripts.attendance_report_common as cmn
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 接口限制（check result / check record）

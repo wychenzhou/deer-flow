@@ -21,7 +21,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-import attendance_report_common as cmn
+import skills.public.dws.scripts.attendance_report_common as cmn
 
 MAX_USERS_PER_BALANCE_BATCH = 20
 BASE_HEADERS = ["姓名", "部门", "入职时间", "首次工作时间"]

@@ -20,7 +20,7 @@ _scripts_dir = Path(__file__).resolve().parent
 if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
-from minutes_list_parse import uuid_title_pairs_from_payload
+from skills.public.dws.scripts.minutes_list_parse import uuid_title_pairs_from_payload
 
 
 def run_dws(

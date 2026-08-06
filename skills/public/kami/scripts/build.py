@@ -32,14 +32,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from highlight import highlight_code_blocks
-from optional_deps import (
+from skills.public.kami.scripts.highlight import highlight_code_blocks
+from skills.public.kami.scripts.optional_deps import (
     MissingDepError,
     require_pypdf_reader,
     require_pypdf_writer,
     require_weasyprint_html,
 )
-from shared import (
+from skills.public.kami.scripts.shared import (
     DIAGRAMS,
     EXAMPLES,
     TEMPLATES,
@@ -48,7 +48,7 @@ from shared import (
 )
 
 # Implementation modules (also re-exported for tests / external callers).
-from checks import (  # noqa: F401  re-exported for test_build.py
+from skills.public.kami.scripts.checks import (  # noqa: F401  re-exported for test_build.py
     _BG_B,
     _BG_G,
     _BG_R,
@@ -60,7 +60,7 @@ from checks import (  # noqa: F401  re-exported for test_build.py
     check_placeholders,
     check_rhythm,
 )
-from lint import (  # noqa: F401  re-exported for test_build.py
+from skills.public.kami.scripts.lint import (  # noqa: F401  re-exported for test_build.py
     _extract_root_vars,
     _off_palette_findings,
     _pair_names,
@@ -69,8 +69,8 @@ from lint import (  # noqa: F401  re-exported for test_build.py
     check_off_palette,
     scan_file,
 )
-from tokens import sync_check
-from verify import (
+from skills.public.kami.scripts.tokens import sync_check
+from skills.public.kami.scripts.verify import (
     show_fonts,
     verify_all,
     verify_target as _verify_target_impl,

@@ -47,7 +47,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
-import attendance_report_common as cmn
+import skills.public.dws.scripts.attendance_report_common as cmn
 
 # 默认关注字段 — 与 SKILL.md「月度汇总预定义列集合」严格对齐（共 20 个）
 # 字段名必须和 `dws attendance report columns` 返回的 name 精确匹配

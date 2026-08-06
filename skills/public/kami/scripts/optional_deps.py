@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-from shared import configure_weasyprint_runtime
+from skills.public.kami.scripts.shared import configure_weasyprint_runtime
 
 # On Linux, WeasyPrint links against cairo / pango / harfbuzz at runtime; a bare
 # `pip install weasyprint` succeeds but then fails to load with a cryptic

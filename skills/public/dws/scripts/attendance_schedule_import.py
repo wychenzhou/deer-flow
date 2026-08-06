@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Any
 
 # 复用公共模块
-from attendance_report_common import (
+from skills.public.dws.scripts.attendance_report_common import (
     run_dws,
     DwsCallError,
     extract_records,

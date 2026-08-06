@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from build import (  # noqa: E402
+from skills.public.kami.scripts.build import (  # noqa: E402
     DIAGRAM_TARGETS,
     HTML_TARGETS,
     PPTX_TARGETS,
@@ -39,7 +39,7 @@ from build import (  # noqa: E402
     check_placeholders,
     scan_file,
 )
-from shared import (  # noqa: E402
+from skills.public.kami.scripts.shared import (  # noqa: E402
     HTML_TEMPLATES,
     PARCHMENT_RGB,
     ROOT as REPO_ROOT,
@@ -48,9 +48,9 @@ from shared import (  # noqa: E402
     build_targets,
     screen_targets,
 )
-import highlight as highlight_mod  # noqa: E402
-from highlight import highlight_code_blocks  # noqa: E402
-from verify import RECOGNIZABLE_FALLBACK_FONT_MARKERS  # noqa: E402
+import skills.public.kami.scripts.highlight as highlight_mod  # noqa: E402
+from skills.public.kami.scripts.highlight import highlight_code_blocks  # noqa: E402
+from skills.public.kami.scripts.verify import RECOGNIZABLE_FALLBACK_FONT_MARKERS  # noqa: E402
 
 
 # --------------------------- helpers ---------------------------
@@ -660,8 +660,8 @@ def test_marp_themes_token_synced() -> None:
     Marp decks cannot silently drift even if that glob is later refactored away.
     """
     import json
-    from shared import TOKENS_FILE
-    from tokens import CSS_VAR, ROOT_BLOCK
+    from skills.public.kami.scripts.shared import TOKENS_FILE
+    from skills.public.kami.scripts.tokens import CSS_VAR, ROOT_BLOCK
 
     canonical = {k.lstrip("-"): v.strip().lower()
                  for k, v in json.loads(TOKENS_FILE.read_text(encoding="utf-8")).items()}

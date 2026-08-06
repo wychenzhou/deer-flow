@@ -15,8 +15,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from optional_deps import MissingDepError, require_pymupdf
-from shared import EXAMPLES, PARCHMENT_RGB, ROOT, load_checks_thresholds
+from skills.public.kami.scripts.optional_deps import MissingDepError, require_pymupdf
+from skills.public.kami.scripts.shared import EXAMPLES, PARCHMENT_RGB, ROOT, load_checks_thresholds
 
 PLACEHOLDER = re.compile(r"\{\{[^}]+\}\}")
 

@@ -30,7 +30,7 @@ import sys
 from datetime import datetime, timedelta
 from typing import Any
 
-from attendance_report_common import (
+from skills.public.dws.scripts.attendance_report_common import (
     DATE_FMT,
     DATETIME_FMT,
     DwsCallError,
