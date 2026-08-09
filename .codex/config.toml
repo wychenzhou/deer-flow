@@ -1,0 +1,5 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+CONTEXT7_API_KEY = "ctx7sk-d6758e35-764e-42e2-8a1c-9ec4f6bf7f71"
