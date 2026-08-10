@@ -83,7 +83,7 @@ LLM 是无状态的:每次对话,模型只看到当前上下文窗口里的内�
 | `MemoryUpdater` | 大脑:组织 prompt、调 LLM、做闸门校验、算 change set | 分析员 |
 | `MemoryStorage` | 手脚:锁、乐观锁、原子写文件 | 档案室 |
 
-> 记忆相关的两个中间件(`MemoryMiddleware` / `DynamicContextMiddleware`)与摘要前的紧急冲刷 hook,如何逐行落地、如何与这四个核心组件分工,见 **§13 记忆相关中间件实现详解**。
+> 记忆相关的两个中间件(`MemoryMiddleware` / `DynamicContextMiddleware`)与摘要前的紧急冲刷 hook,如何逐行落地、如何与这四个核心组件分工,见 **§11 记忆相关中间件实现详解**。
 
 **为什么队列/异步**:
 - LLM 抽取有延迟和成本,不能阻塞用户看到回复。
@@ -167,10 +167,6 @@ source:
   type: extraction
   threadId: "thread-abc"
 ---
-
-# 用户偏好使用 uv 而非 pip 安装 Python 依赖
-
-用户在某次对话中纠正: 安装依赖用 uv, 不用 pip。
 ```
 
 **每个字段的含义与设计意图**:
@@ -229,6 +225,10 @@ agent_name ← 当前 Agent 名(默认 __default__)
    - 用模式文件匹配最近几轮,识别 **6 类信号**:`correction`(用户纠正)、`reinforcement`(用户认可)、`preference`、`identity`、`goal`、`decision`。
    - **为什么**:correction 信号让抽取格外重视"纠正后的内容"——这是记忆里价值最高、最该保留的信息。
    - **识别机制详解(正则模式、扫描窗口、如何变成 prompt 提示段)见 §5.2.1**。
+
+> **信号 ≠ 事实类别。** 信号是"用户当前在做什么对话行为"(检测于消息层面);事实类别是"这条信息是什么性质"(抽取后用于存储)。二者名字部分重合,但不一一对应——比如 `reinforcement` 是信号,却**没有** `reinforcement` 这个 category;它只用于提升已有事实的置信度,不单独建类存储。完整映射见 §5.2.1。
+>
+> **信号的本质**:正则匹配到用户行为 → 转成 prompt 里的一句"软提示"(如"用户在纠正你,建议 confidence≥0.95") → 引导 LLM 在抽取时更敏感、更对准。信号本身不直接产生事实,只影响抽取策略。
 
 ---
 
@@ -322,6 +322,19 @@ correction.yaml(命中 → 用户纠正)            reinforcement.yaml(命中 �
 (完整清单在 `core/message_patterns/correction.yaml` 与 `reinforcement.yaml`;可用 `patterns_dir` 覆盖,加语言/业务短语不用改代码。注意"你说的对/没错"这类中文确认**刻意不在默认 reinforcement 里**——`对` 会误伤"对不起/对方",详见文件注释。)
 
 识别出的信号(现在是 **6 类**:`correction` / `reinforcement` / `preference` / `identity` / `goal` / `decision`)被 `_build_signal_hints` 转成**软提示** `correction_hint`(名字是历史遗留,现在承载全部信号提示)塞进 prompt——比如命中 correction 时提示"记录为 confidence ≥ 0.95 的 correction 类事实,且仅当它是可复用的用户级偏好;对当前任务文件/方向的纠正是 thread/project 级,不得入库"。
+
+**信号 → 事实类别的映射**(不是一一对应):
+
+| 信号 | 含义 | 通常映射到 Category | 说明 |
+|---|---|---|---|
+| `correction` | 用户在纠正 Agent | `correction` | 直接对应;特权类别 |
+| `reinforcement` | 用户在认可/确认 | *(不新建类别)* | 只提升已有事实的 confidence,或验证 preference/behavior |
+| `preference` | 用户表达偏好/反感 | `preference` | 直接对应 |
+| `identity` | 用户透露身份/背景 | `context` / `knowledge` | "我是后端工程师"→`context`;"我精通 Python"→`knowledge` |
+| `goal` | 用户表达目标/方向 | `goal` | 直接对应 |
+| `decision` | 用户做选择/决定 | `preference` / `goal` | "我决定用 uv"→`preference`;"我要完成迁移"→`goal` |
+
+**一句话本质**:信号 = "检测用户行为 → 转成 prompt 里的软提示 → 引导 LLM 按正确策略抽取并归类"。它不直接产生事实,只影响抽取策略(如 correction 要求 confidence≥0.95;reinforcement 要求验证而非新建)。
 
 **信号只是提示,不是裁决**:它提高模型对"纠正/认可"内容的敏感度,但最终能不能入库,由 §5.5 的**确定性写闸门**逐条判定。信号还有第二个用途——**背压豁免**:带信号的更新在队列满时也总是被允许入队(§4 队列设计),保证高价值记忆不被丢。
 
@@ -638,7 +651,7 @@ F3 用户关注 polars      F6 用户了解分布式计算   F9 用户用 ClickH
 | `staleFactsToRemove[]` / `staleFactsToExtend[]` | 过期复查:删 / 延 | LLM 在复查段判 | 与候选集求交集(§5.2.2) | `{"id":"...","extend_by_days":365}` |
 | `factsToConsolidate[]` | 碎片合并决策 | LLM 在合并段判 | 源存在/不重叠/置信度守卫(§5.2.3) | 见 §5.3.3 |
 
-**配置字段(系统定义,不是 LLM 产出)**:`staleness_age_days`(90)、`fact_confidence_threshold`(0.7)、`max_facts`(100)、`staleness_min_candidates`(3)、`staleness_max_removals_per_cycle`(10)、`staleness_protected_categories`(`["correction"]`)、`consolidation_min_facts`(8)等——这些"为什么这么设计、每个默认值什么意思",已分别在 **§5.2.2(过期复查变量表)** 和 **§5.2.3(碎片合并变量表)** 逐条解释;热更新与运维说明见 §10。
+**配置字段(系统定义,不是 LLM 产出)**:`staleness_age_days`(90)、`fact_confidence_threshold`(0.7)、`max_facts`(100)、`staleness_min_candidates`(3)、`staleness_max_removals_per_cycle`(10)、`staleness_protected_categories`(`["correction"]`)、`consolidation_min_facts`(8)等——这些"为什么这么设计、每个默认值什么意思",已分别在 **§5.2.2(过期复查变量表)** 和 **§5.2.3(碎片合并变量表)** 逐条解释。
 
 ### 5.5 写闸门:确定性 + 逐条 fail-closed
 
@@ -691,11 +704,6 @@ LLM 用 `factsToRemove` 表达"这条旧事实被推翻了",可带 `replacementF
 "newFacts": [ { "content": "用户偏好使用 uv 而非 pip", "category": "correction", ... } ]
 ```
 → 只有当 `newFacts[0]` 通过闸门后,`fact_z` 才被删除。
-
-### 6.2 去重与上限
-
-- **内容去重**:whitespace 归一化(含大小写折叠)后已存在相同内容 → 拒绝(防重复记录)。
-- **`max_facts`**(默认 100):超限按置信度从高到低保留。
 
 ---
 
@@ -753,7 +761,7 @@ get_context(user_id, agent_name)                       # DeerMem 实现
 
 _get_memory_context(...)                               # lead_agent/prompt.py 调用侧
   → 用 <memory>...</memory> 包一层
-  → DynamicContextMiddleware 注入首条用户消息前(§13.3 的 ID 交换)
+  → DynamicContextMiddleware 注入首条用户消息前(§11.3 的 ID 交换)
 ```
 
 **为什么 read 是"全量读 + 格式化"而不是"查询"**:注入路径要快、要确定,不能引入额外的一次 LLM 调用或检索依赖——置信度已经是"这条信息有多可靠"的最好代理(见 §8.2 设计理由)。
@@ -772,36 +780,60 @@ _get_memory_context(...)                               # lead_agent/prompt.py �
 
 被截断的事实**不查、不用**——每次注入重新读盘重新算,记忆文件本身不受影响。
 
-#### 8.2.2 预算分配(为什么"纠正"几乎总是被带上)
+#### 8.2.2 预算分配:双预算结构与裁减规则
+
+##### 双预算结构
+
+注入采用**主预算 + 特权预留**的双池设计,避免高价值事实在预算竞争中被挤掉:
+
+| 预算池 | 默认值 | 用途 | 超支行为 |
+|---|---|---|---|
+| **特权预留** (`guaranteed_token_budget`) | 500 tokens | `guaranteed_categories` 专属(默认仅 `correction`) | 超支部分**向上溢出**到主预算,且自身绝不被截断 |
+| **主预算** (`max_tokens`) | 2000 tokens | 摘要(六段) + 普通事实 | 按置信度贪心填充,满即停 |
+
+> **为什么 correction 必须是特权**:用户纠正的信息价值密度最高——"别再犯同样的错"如果因预算满了而被漏掉,代价远大于少带一条普通偏好。预留区保证它**无论主预算多满都一定在场**。
+
+##### 填充顺序(三步)
+
+```
+Step 1: guaranteed 事实(correction) → 先占特权预留(500)
+        └─ 实际用量 ≤ 500: 只花预留,不碰主预算
+        └─ 实际用量 > 500: 超出部分向上挤占主预算
+Step 2: 摘要(六段) → 无条件全部进入主预算
+Step 3: 普通事实 → 按 confidence 从高到低依次进主预算,直到主预算用尽
+```
+
+##### 上限的两种场景
+
+| 场景 | guaranteed 用量 | 总输出上限 | 说明 |
+|---|---|---|---|
+| **常态** | ≤ 500(预留内) | `max_tokens` (2000) | guaranteed 行只是**替换**了同等长度的普通事实位置,总上限不变 |
+| **correction 很多** | > 500(溢出) | `max_tokens + guaranteed_actual_usage` | 上限被**抬高**以保护 guaranteed 行不被安全截断误删;普通事实相应被挤占 |
+
+> 例:若 correction 事实实际占 600 tokens,主预算只剩 2000-100=1900 给摘要+普通事实;但总输出上限被抬到 2600,保证那 600 tokens 的 correction 完整保留。
+
+##### 安全截断规则
+
+预算溢出时,裁剪器遵循**"Facts 优先,尾部裁摘要"**:
+
+- `Facts` 块被视为**受保护后缀**——溢出时只从尾部裁剪 `User Context` / `History`,**绝不裁 Facts**(尤其是 guaranteed 行)。
+- 如果主预算连摘要都装不下,先压缩 `History` 段,再压缩 `User Context` 段,`Facts` 始终最后才被触碰。
+- 这条规则与上限抬高机制配合:guaranteed 行即使在极端溢出场景下也至少有"预留 + 主预算剩余"双重保护。
+
+##### 计费方式
 
 ```python
 format_memory_for_injection(
     memory_data,
-    max_tokens=2000,                        # 主预算(DeerMemConfig.max_injection_tokens)
-    guaranteed_categories=["correction"],   # 特权类别
-    guaranteed_token_budget=500,            # 特权预留
-    use_tiktoken=True,                      # 计费方式; False = CJK 感知的字符估算, 不碰网络
+    max_tokens=2000,                        # 主预算
+    guaranteed_categories=["correction"],   # 哪些类别进特权预留
+    guaranteed_token_budget=500,            # 特权预留额度
+    use_tiktoken=True,                      # True = tiktoken 精确计费; False = CJK 感知的字符估算(离线)
 )
 ```
 
-```
-分配顺序:
-  1. guaranteed 类别(correction)的事实先放,占用 guaranteed_token_budget(500)
-     —— 它们用独立预算,不占用主预算
-  2. 摘要(六段)一定放
-  3. 剩余主预算按置信度从高到低放普通事实,直到用满 2000
-```
-
-**预算的真实语义,比"500 + 2000"两个数略微妙**(`prompt.py::format_memory_for_injection`):
-
-| 情况 | 总输出上限 |
-|---|---|
-| 常态:guaranteed 行数少 | 总输出 ≤ `max_tokens`(2000)——guaranteed 行只是**挤占**普通行,不额外加钱 |
-| guaranteed 本身就把总输出顶过 2000 | 上限被抬到 `max_tokens + guaranteed_actual_usage`,保护 guaranteed 行不被安全截断误删 |
-
-还有一个**安全截断细节**:`Facts` 块被当作"受保护后缀"——预算溢出时只从尾部裁剪前面的 User Context / History,**绝不裁掉 Facts**(尤其是 guaranteed 行)。
-
-**为什么 correction 是特权**:用户纠正的信息价值密度最高、最该让 Agent"记得别再犯"。把它放进预留区,意味着即使普通事实把预算挤满,纠正也一定在场。
+- `use_tiktoken=True` 时依赖 tiktoken 的 BPE 编码,首次调用可能触发编码下载(网络阻塞,最坏约 26 分钟;已用 5 秒超时兜底,见 §11.3.3)。
+- `use_tiktoken=False` 时采用离线字符估算,不碰网络,适合启动期或 tiktoken 不可用的场景。
 
 #### 8.2.3 完整示例(一个具体记忆 → 注入出的文本)
 
@@ -949,7 +981,7 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 - 审计"这次 run 到底用了哪份记忆"。
 - 后续 run / 分支复用冻结的记忆块(不重复读盘),校验来源防伪造。
 
-(注入侧的落点见 §13.3.4。)
+(注入侧的落点见 §11.3.4。)
 
 ---
 
@@ -965,58 +997,272 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 ---
 
-## 10. 运营与运维
-
-**迁移**:
-- 旧版内嵌事实的 JSON → 自动迁移到 Markdown,迁移前备份 `.v1.bak`,冲突 fail-loud 不丢数据。可提前审计:`python scripts/migrate_memory_markdown.py --all-users --dry-run`。
-
-**备份 / 恢复**:
-- 整个 `backend/.deer-flow/users/` 就是全部记忆(摘要 + 事实),整体打包即可;索引 `.retrieval/` 可从 `.md` 重建,可选备份。
-
-**人工编辑**:
-- 可直接改 `facts/*.md`;但改完要触发 `reload`(或等下次自动重载),且手工编辑**不更新 `revision`**——并发写可能冲突,建议编辑后调用 `/api/memory/reload` 并避免同时对话。
-
-**彻底重置某用户记忆**:
-- 删除 `users/{user_id}/` 整目录(下次对话重建)。前端 `/api/memory` 也提供清空操作。
-
-**监控**:
-- `scope_gate_rejections` 统计 + 抽取指标回调(Langfuse span);`/api/memory/status` 看后端状态。
-
-**配置热更新**:
-- `memory.*` 属可热加载字段,改 config 下次消息生效。
-
-**看不到事实? 排查**:
-- 检查:① 是否 `injection_enabled: false`;② 是否该 Agent 桶(换了 Agent 就换了桶);③ 是否被 staleness 清掉(可查日志 `rejected_by_scope_gate` / staleness 记录)。
-
 ---
 
-## 11. 权衡与取舍(为什么这么做)
+## 10. 扩展点(如何接入自己的存储)
 
-| 决策 | 权衡 | 为什么偏向这个方向 | 详见 |
+整个记忆系统对"换实现"是**分层开放的**:从"换掉整套记忆逻辑"到"只换一条 prompt",有 6 个粒度递减的扩展点。改得越深,收益越大,但要遵守的契约也越多。先看总览:
+
+| 扩展点 | 配置入口 | 需要写什么 | 粒度 |
 |---|---|---|---|
-| 文件存储而非 DB | 牺牲跨进程强一致 | 单机够用;文件可 diff、可人工编辑、零依赖;乐观锁兜住并发 | §7.1 |
-| 一次 LLM 调用做六件事 | 单次调用更复杂 | 省 API;让模型做跨时间判断(矛盾/过期/合并) | §5 开头 |
-| 逐条 fail-closed 闸门 | 可能漏记 | 漏记代价 < 错记代价(错记会持续污染个性化) | §5.5 |
-| correction 特权注入 | 挤占注入预算 | 纠正价值最高,值得永远在场 | §8.2.2 |
-| 过期/合并默认保守 | 记忆可能不够"精炼" | 宁保留也别误删;合并默认关因有损 | §5.2 |
-| `scope/durability/authority` 不落盘 | 每次重算 | 它们是指决策输入,不是数据;避免污染模型 | §3.2 |
-| 隔离按 (user,agent),线程不隔离 | 跨线程共享 | 这正是"长期记忆"的意义;线程级隔离另有会话历史承担 | §9 |
+| **换后端** | `memory.manager_class` | 新 `backends/<name>/` 文件夹(一个 `MemoryManager` 子类) | 整套记忆逻辑(存储+抽取+检索) |
+| **换存储类** | `memory.backend_config.storage_class` | 一个 `MemoryStorage` 子类 | 只换持久化,保留 LLM 抽取/队列 |
+| **换检索适配器** | `memory.backend_config.retrieval_adapter` | 一个 `RetrievalPort` 实现 | 只换"按关键词查事实" |
+| **自定义抽取模板** | `memory.backend_config.prompts_dir` | YAML prompt 文件 | 只换"模型怎么记" |
+| **自定义信号模式** | `memory.backend_config.patterns_dir` | YAML 正则文件 | 只换"识别哪些信号" |
+| **观测钩子** | 程序注入 `callbacks` / `extraction_callback` | 一个类或函数 | 只加可观测性,不改行为 |
+
+> 一条通用原则贯穿全章:**memory 是持久状态,任何解析/接入失败都必须 fail-loud**——绝不允许"配置写错了但静默回退到默认后端"这种悄悄把数据写进错误存储的行为。
 
 ---
 
-## 12. 扩展点(如何接入自己的存储)
+### 10.1 换后端:接入一个完整的记忆系统
 
-- **换后端**:`memory.manager_class` 可以是内置名(`deermem`/`mem0`/`openviking`/`noop`),或**任意 dotted 路径**指向一个 `MemoryManager` 子类。`backend_config` 原样传给后端 `__init__`,后端自己解析。
-- **换存储类**:`backend_config.storage_class` 可指向自定义 `MemoryStorage` 实现(实现 `load/save/apply_changes/fact CRUD` 契约)。
-- **自定义抽取模板**:`backend_config.prompts_dir` 指向目录,可覆盖 `memory_update.chat.yaml`/`staleness_review.yaml`/`consolidation.yaml`/`fact_extraction.yaml`(支持按 Agent 分子目录)。
-- **自定义信号模式**:`backend_config.patterns_dir` 覆盖 `correction.yaml`/`reinforcement.yaml`。
-- **观测钩子**:`extraction_callback` 在每次抽取后回调(token 用量、接受/拒绝统计)。
+这是最深、也最常见的扩展点:把整套记忆系统换成你自己的(mem0、OpenViking、向量库、自建服务……)。**所有现有的读写链路的中间件一行都不用改**——它们只通过 `MemoryManager` 这个抽象契约通信(见 §11.5 的分工边界)。
 
-> 写自定义后端记得:解析失败必须 fail-loud(不能静默换回 deermem);网络后端需实现异步 `a*` 方法,避免阻塞事件循环。
+#### 10.1.1 契约:`MemoryManager` 接口
+
+后端必须实现的是 pydantic `BaseModel` 子类(不是裸 ABC),所以它**免费获得字段校验和序列化**;同时 `ModelMetaclass` 派生自 `ABCMeta`,没实现的抽象方法在实例化时就抛 `TypeError`——记忆是持久状态,缺了 `add`/`get_context` 的后端是严重 bug,必须在构造期抓住,而不是运行时才炸。
+
+方法分三层:
+
+| 层 | 方法 | 必须? | 说明 |
+|---|---|---|---|
+| **Tier-1 抽象** | `add(thread_id, messages, ...)` / `get_context(user_id, ...)` | **必须** | 写(入队抽取)+ 读(返回注入文本)。这是后端的根本职责 |
+| **Tier-2 管理** | `add_nowait` / `search` / `get_memory` / `clear_memory` / `import_memory` / `export_memory` / `shutdown_flush` | 可继承默认 | 默认抛 `NotImplementedError` 或空实现;`add_nowait` 默认委托 `add`,`shutdown_flush` 默认 `True`(无缓冲就没得排空) |
+| **Tier-3 可选** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` | 可继承默认 | 启动预热、手动 reload、事实 CRUD;只覆盖你支持的那些 |
+
+构造入口是**类方法** `from_config(backend_config, *, mode, **host_hooks)`,由工厂调用而不是直接 `cls(...)`——这样每个后端自己决定怎么组装依赖、消费哪些 host hook。
+
+两个**类级声明**(ClassVar,不是字段):
+
+| 声明 | 含义 |
+|---|---|
+| `supports_search: ClassVar[bool]` | 是否实现了 `search()`。默认 `False`;实现了就必须设 `True`,否则实例化时不变式校验直接抛错(`mode="tool"` 强制要求 search 支持) |
+| `requires_passive_writes_in_tool_mode: ClassVar[bool]` | `mode: tool` 下是否仍需要 `MemoryMiddleware` 被动抽取。默认 `False`(工具模式完全模型主导);设 `True` 的后端(如 openviking:搜索靠工具、持久写靠对话抽取)在工具模式下会**保留** `MemoryMiddleware`,形成"工具搜索 + 被动抽取"混合模式(§11.2) |
+
+**契约的三个刻意中立点**(想清楚再实现,别照搬 DeerMem 的假设):
+
+- `get_context` 返回**注入就绪的纯文本**,格式由后端自己定——DeerMem 做"全量读 + 置信度裁剪",别的后端可以自己做检索 + 格式化。格式**不是契约的一部分**。
+- `add` 收到的是**原始对话消息**,过滤/信号检测是后端的私有事务——DeerMem 在 `message_processing.py` 里做,别的后端按自己的策略来。
+- **不假设"事实"模型**——后端完全可以不存 fact,只要 `get_context` 能返回文本、`add` 能更新记忆。
+
+#### 10.1.2 drop-in 发现机制 + fail-loud
+
+不需要改任何注册表。工厂在 `backends/` 目录下**自动扫描**:每个有 `__init__.py` 且暴露 `MANAGER_CLASS` 属性的子文件夹,就以**文件夹名**注册(文件夹名 == 后端名 == `manager_class` 配置值)。
+
+`manager_class` 的解析顺序:
+
+```
+① 已注册的短名        deermem / mem0 / openviking / noop(或你新加的)
+② dotted 路径          "pkg.mod:Cls" 或 "pkg.mod.Cls"  → 任意包里的 MemoryManager 子类
+③ 都解析不到           → raise ValueError(fail-loud)
+```
+
+第 ③ 条是**刻意为之**:`manager_class` 拼错/导入失败时,绝不静默回退到 deermem——否则用户的写入会悄悄落到错误的存储,这是静默的数据完整性地雷。解析发生在启动期(急着预热),让运维当场修配置,而不是跑起来才发现写错地方。
+
+#### 10.1.3 可移植性黄金规则
+
+后端收到 host 的全部信息,只通过**两个通道**:
+
+```
+① MemoryManager 方法参数      user_id / agent_name / thread_id / messages / ...
+② backend_config dict         传给 __init__ 的字段(你自己的 knob:model、vector_store、阈值...)
+```
+
+**整个后端文件夹里只允许一行 `from deerflow`**——就是导入 ABC 契约那行 `from deerflow.agents.memory.manager import MemoryManager`。其他一切(deer-flow 路径 helper、配置单例、模型工厂)**都不许 import**;存储根目录从 `backend_config["storage_path"]` 读(host 注入),自己绝不调用路径解析。
+
+为什么这么严:这一行就是后端和 host 的唯一耦合点。想把它移植到另一个 agent,只改这一行导入即可。任何多余的 `from deerflow.xxx` 都会让"换后端"变成"改宿主代码"。
+
+#### 10.1.4 动手步骤(六步,参照 noop 模板)
+
+`backends/noop/` 是一个刻意写全的**空实现模板**(存什么、读什么都返回空)。照抄它:
+
+```text
+① 复制 backends/noop/ → backends/<yourname>/
+② config.py    声明你的配置字段 + from_backend_config():从 backend_config dict 解析,
+                只读已知键;storage_path 从这里取,绝不 import deer-flow 路径 helper
+③ <yourname>_manager.py   重命名类;把依赖(storage/llm/queue/连接)声明成
+                PrivateAttr;model_post_init 里用 self.backend_config 解析成你的 config;
+                实现 Tier-1 的 add / get_context(必须)
+④ (可选)覆盖 Tier-3 hooks  你支持 create_fact/delete_fact/update_fact/search/warm 就覆盖,
+                不支持就继承默认(callers 捕 NotImplementedError)
+⑤ __init__.py     设置 MANAGER_CLASS = YourManager
+⑥ config.yaml     memory.manager_class: <yourname>
+```
+
+`backend_config` 由 `memory.backend_config` 传给后端,host 还会额外注入 `storage_path`(默认状态目录)。你自己的 knob 也放这里:
+
+```yaml
+memory:
+  enabled: true
+  manager_class: myredis
+  backend_config:
+    storage_path: .deer-flow          # host 注入默认,也可自己写
+    redis_url: redis://localhost:6379 # ← 你自己的 knob,config.py 里解析
+    max_facts: 100
+```
+
+#### 10.1.5 最小示例:一个"Redis 后端"的骨架
+
+```python
+# backends/myredis/config.py
+class MyRedisConfig:
+    def __init__(self, *, storage_path: str, redis_url: str):
+        self.storage_path = storage_path
+        self.redis_url = redis_url
+
+    @classmethod
+    def from_backend_config(cls, backend_config: dict | None) -> "MyRedisConfig":
+        cfg = dict(backend_config or {})
+        return cls(
+            storage_path=str(cfg.get("storage_path") or ""),
+            redis_url=str(cfg.get("redis_url", "redis://localhost:6379")),
+        )
+```
+
+```python
+# backends/myredis/myredis_manager.py
+from deerflow.agents.memory.manager import MemoryManager   # ← 唯一允许的 from deerflow
+
+class MyRedisManager(MemoryManager):
+    _config = PrivateAttr(default=None)
+    _client = PrivateAttr(default=None)
+
+    def model_post_init(self, __context) -> None:
+        self._config = MyRedisConfig.from_backend_config(self.backend_config)
+        self._client = redis.Redis.from_url(self._config.redis_url)
+
+    @classmethod
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
+        return cls(backend_config=backend_config, mode=mode)
+
+    def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None):
+        # ① 过滤出 user + final-AI(这是你的私有事务)
+        # ② 调你自己的抽取 LLM → 写入 Redis(按 (user, agent) 桶隔离)
+        ...
+
+    def get_context(self, user_id, *, agent_name=None, thread_id=None):
+        # 读 Redis 里该桶的记忆,格式化(任何格式都行)返回注入文本
+        ...
+```
+
+**网络后端的异步义务**:如果后端要发起网络调用,必须覆盖 `aadd` / `aget_context` / `asearch`(基类默认是**同步委托**,没有并发收益)。`MemoryMiddleware.aafter_agent` 调 `aadd`,而它是 `asyncio.to_thread(get_memory_manager)` 解析完再调的——但网络 IO 本身必须由你的 `a*` 方法自己 offload(参考 `backends/openviking/` 的 async 入口,它把同步 HTTP 和文件 IO 都挪出了事件循环)。
 
 ---
 
-## 13. 记忆相关中间件实现详解(代码级)
+### 10.2 换存储类 / 检索适配器:只换"手脚"
+
+如果你**认可 DeerMem 的抽取/队列/闸门逻辑**,只想把"档案室"从文件换成别的,那就不要换后端——只换下面两层:
+
+#### 10.2.1 `MemoryStorage` 契约
+
+`memory.backend_config.storage_class` 指向一个 `MemoryStorage` 子类。抽象方法三个:
+
+| 方法 | 语义 |
+|---|---|
+| `load(agent_name, *, user_id)` | 读该 `(user, agent)` 桶的完整记忆文档(兼容形态,含 `facts` 列表) |
+| `reload(agent_name, *, user_id)` | 丢弃缓存,强制重读(绕过内存缓存) |
+| `save(memory_data, agent_name, *, user_id, expected_revision)` | 写回;`expected_revision` 是乐观锁版本,冲突时返回 `False` 或抛错 |
+
+可选的增量路径(强烈建议覆盖,否则写整份文档):
+
+- `apply_changes(change_set, **scope)` —— 应用一个**变更集**(只改增量),原子的、可回滚的;这是 DeerMem 文件存储的精髓:摘要和每条事实分开落盘,改一条不动整份。
+- `clear_all(user_id)` / `close()` —— 清空该用户全部桶 / 释放资源。
+
+> 换存储类 ≠ 换后端:你仍然需要 `MemoryManager` 里的 `add`/`get_context`(它们把"对话 → 抽取 → 调 storage"串起来)。`storage_class` 只是把 DeerMem 的存储依赖替换掉;如果连抽取/闸门逻辑也要换,那应该走 §10.1 换后端。
+
+#### 10.2.2 `RetrievalPort` 契约(检索适配器)
+
+`memory.backend_config.retrieval_adapter` 指向一个 `RetrievalPort` 实现(默认 `fts5`,空字符串关闭)。这是存储层**对外接检索的插槽**:存储层在写完事实后**释放锁再通知**它 upsert/remove(§A.6),搜索时把 `search()` 委托给它。
+
+```python
+class RetrievalPort(Protocol):
+    def upsert(self, fact: dict, *, scope: dict, path: str) -> None: ...
+    def remove(self, fact_id: str, *, scope: dict) -> None: ...
+    def search(self, query: str, *, scopes: list[dict], top_k: int,
+               mode: str, filters: dict | None) -> list[dict]: ...
+    def clear(self, *, scopes: list[dict] | None = None) -> None: ...
+    def rebuild(self, records: list[tuple], *, scopes: list[dict] | None) -> None: ...
+```
+
+**关键设计**:检索索引是**派生的、可重建的**——权威数据在 `facts/*.md`,索引坏了删了重建,丢了从事实文件重新灌(§8.4)。所以自定义检索适配器只负责"给个能搜的视图",永远不拥有权威数据。
+
+---
+
+### 10.3 自定义抽取模板:只换"怎么记"
+
+`memory.backend_config.prompts_dir` 指向一个目录,可覆盖四份 prompt(§5.2、§5.3):
+
+```
+{prompts_dir}/
+├── memory_update.chat.yaml    # 主抽取模板(system + user 两条消息,§5.3)
+├── staleness_review.yaml      # 过期复查的 text 模板(§5.2.2)
+├── consolidation.yaml         # 碎片合并的 text 模板(§5.2.3)
+└── fact_extraction.yaml       # 事实提取
+```
+
+支持**按 Agent 分子目录**:`{prompts_dir}/{agent_name}/memory_update.chat.yaml` 只覆盖特定 Agent,没配的那层回退到上一级。
+
+**改动这个扩展点有一个必须遵守的契约**:模板输出的 JSON 必须继续带 `scope`/`durability`/`authority` 分类字段(§5.4)——因为写闸门(§5.5)是 fail-closed 的,模板里没了这些字段,**每一次抽取写都会被闸门拒掉**,表现为 `rejected_by_scope_gate` 指标暴涨、记忆永远写不进去。自定模板前先确认:你的模板产出是否仍携带这三个标签。
+
+---
+
+### 10.4 自定义信号模式:只换"识别什么"
+
+`memory.backend_config.patterns_dir` 覆盖两个信号检测的正则文件(§5.2.1):
+
+```
+{patterns_dir}/
+├── correction.yaml       # 识别"用户纠正"
+└── reinforcement.yaml    # 识别"用户认可"
+```
+
+文件里是 `regex.search` 用的模式清单。加语言/业务短语**不用改任何代码**——把新短语写进 YAML 即可。两个真实注意点(来自 §5.2.1 的注释):
+
+- 中文 `对` 这类确认**刻意不在默认 reinforcement 里**——`对` 会误伤"对不起/对方"。你自己加模式时留意单字正则的误伤。
+- `patterns_dir` 一旦显式设置,**两个文件都必须存在**(否则启动即 fail-loud,不静默回退到内置模式)。
+
+---
+
+### 10.5 观测钩子:只加可观测性
+
+两个钩子,都是**程序注入**(来自 factory 的 `host_hooks`,不是 YAML 字段):
+
+| 钩子 | 时机 | 用途 | 默认 |
+|---|---|---|---|
+| `callbacks`(一个 `MemoryCallbacks`) | **每次 LLM 调用前** | 往 `invoke_config` 里塞 trace 元数据,让记忆抽取的 span 与主对话 trace 对齐(§11.2 的 trace_id 落点) | `LangfuseMemoryCallbacks`(langfuse 未启用则 no-op) |
+| `extraction_callback(payload)` | **每次抽取后** | token 用量、接受/拒绝统计 | host 默认:打日志 + 拒绝率 >60% 时报警 |
+
+`extraction_callback` 收到的 `payload` 稳定字段(对接自己的监控时按这些键读):
+
+```
+facts_extracted / facts_passed_confidence / rejected_low_confidence /
+rejected_by_scope_gate / scope_gate_rejections / thread_id / model_name /
+token_usage / success
+```
+
+`scope_gate_rejections` 是**按原因分桶**的(`missing`/`scope`/`durability`/`authority`),拒绝率过高说明抽取 prompt 或阈值退化——这正是在 prompt 或模板改坏时(§10.3)第一时间暴露问题的信号。替换成自己的回调时:异常永不向上抛(DeerMem 侧已包了 try)。
+
+---
+
+### 10.6 检查清单
+
+接入完成后,对照这张表自检:
+
+| 检查项 | 为什么 |
+|---|---|
+| `manager_class` 拼写错误是否在启动时报错,而非静默回退? | fail-loud 防数据写错存储(§10.1.2) |
+| 后端文件夹里除 ABC 契约外,是否还有别的 `from deerflow`? | 移植性黄金规则(§10.1.3) |
+| 网络后端是否覆盖了 `aadd` / `aget_context`? | 避免阻塞事件循环(§10.1.5) |
+| `mode: tool` 下 `supports_search` 是否与 `search()` 一致? | 不变式校验,不一致在构造期抛错 |
+| 自定模板后,`rejected_by_scope_gate` 是否仍接近 0? | 模板丢了 scope/durability/authority 会让闸门拒掉一切(§10.3) |
+| `patterns_dir` 里两个文件都在吗? | 显式设置后缺一个就启动失败 |
+| `extraction_callback` 的拒绝率是否在观测范围内? | 监控 prompt/阈值退化(§10.5) |
+
+---
+
+## 11. 记忆相关中间件实现详解(代码级)
 
 前面各节从"设计意图"讲了记忆系统;这一节落到**实际代码**,把参与记忆读写的三个 LangGraph 中间件组件逐个拆开,回答"它们各自在哪一行做了什么、为什么这么做"。对应代码:
 
@@ -1028,7 +1274,7 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 三者合起来就是完整的读写闭环:**flush hook 和 MemoryMiddleware 走写链路, DynamicContextMiddleware 走读链路**。
 
-### 13.1 中间件在链中的位置
+### 11.1 中间件在链中的位置
 
 ```
 基础运行时链(所有 agent 共享, build_lead_runtime_middlewares)
@@ -1047,10 +1293,10 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 关键观察:
 
 - **`MemoryMiddleware` 紧跟在 `TitleMiddleware` 之后**(`agent.py::build_middlewares`)。标题中间件在首轮完成后自动起标题;记忆中间件在它之后,保证任何轮次结束时都能拿到完整、已稳定的消息列表入队。
-- **`DynamicContextMiddleware` 是整个 lead-only 链最靠前的注入者**,并且它的注入是"冻结快照"式的(见 13.3),与静态系统提示词配合最大化前缀缓存命中。
-- **子代理不挂 `MemoryMiddleware`,也不挂 `DynamicContextMiddleware`**(它们只出现在 lead-agent 的 `build_middlewares` 里)。子代理与父线程共享同一个 `thread_id`,若子代理也写记忆,会把内部中转的每轮对话污染进**父线程**的持久记忆——这正是摘要路径必须 `skip_memory_flush=True` 的原因(见 13.4)。
+- **`DynamicContextMiddleware` 是整个 lead-only 链最靠前的注入者**,  (见 11.3),与静态系统提示词配合最大化前缀缓存命中。
+- **子代理不挂 `MemoryMiddleware`,也不挂 `DynamicContextMiddleware`**(它们只出现在 lead-agent 的 `build_middlewares` 里)。子代理与父线程共享同一个 `thread_id`,若子代理也写记忆,会把内部中转的每轮对话污染进**父线程**的持久记忆——这正是摘要路径必须 `skip_memory_flush=True` 的原因(见 11.4)。
 
-### 13.2 `MemoryMiddleware`:写链路捕获器
+### 11.2 `MemoryMiddleware`:写链路捕获器
 
 这是一个**极薄**的中间件,严格遵守"中间件只捕获、后端才过滤"的分工。核心是 `_resolve_add_args` 加两个执行方法:
 
@@ -1098,11 +1344,11 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
 **tool 模式下的特例**:`memory.mode: tool` 时默认不挂 `MemoryMiddleware`(模型通过 `memory_add` 等工具主动写)。但若后端声明 `requires_passive_writes_in_tool_mode = True`(如 openviking:搜索靠工具、持久写仍依赖对话级抽取),则**保留** `MemoryMiddleware`,形成"工具搜索 + 被动抽取"混合模式。
 
-### 13.3 `DynamicContextMiddleware`:读链路注入器
+### 11.3 `DynamicContextMiddleware`:读链路注入器
 
 这是记忆读链路最复杂的一个中间件,负责把记忆和日期注入上下文,同时坚守两条安全红线(见下)。它挂在 `before_agent`,在**每次模型调用前**执行 `_inject`。
 
-#### 13.3.1 冻结快照模式 + 前缀缓存
+#### 11.3.1 冻结快照模式 + 前缀缓存
 
 系统提示词保持**完全静态**(记忆不写进 system prompt),所有动态内容通过一个隐藏的 `SystemMessage` + 隐藏 `HumanMessage` 在**首条用户消息之前**注入,并且**只注入一次、整个会话冻结**:
 
@@ -1113,46 +1359,137 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 后续轮:  原样复用,不再改动 → 前缀缓存每次都能命中
 ```
 
-这套 **ID 交换(ID-swap)** 是核心技巧(`_make_reminder_and_user_messages`):
+这套 **ID 交换(ID-swap)** 是核心技巧,由 `_make_reminder_and_user_messages` 一手完成:
 
-| 消息 | 内容 | ID | 为什么这么安排 |
-|---|---|---|---|
-| `SystemMessage` | `<system-reminder><current_date>…</current_date></system-reminder>` | **原始用户消息 id** | `add_messages` 按 id 就地把原来的用户消息替换掉,消息位置/序号不变 |
-| `HumanMessage`(可选) | `<memory>…</memory>` | `{原始id}__memory` | 记忆块,见下方安全红线 |
-| `HumanMessage` | 真正的用户输入 | `{原始id}__user` | 被替换后的真实消息 |
+```python
+stable_id = original.id or str(uuid.uuid4())          # ① 取原始用户消息的 id 作稳定 id
+
+reminder_kwargs = {"hide_from_ui": True, "dynamic_context_reminder": True}
+if reminder_date is not None:
+    reminder_kwargs["reminder_date"] = reminder_date   # ② 结构化日期,只挂在 SystemMessage 上
+
+messages.append(SystemMessage(content=reminder, id=stable_id, additional_kwargs=reminder_kwargs))
+if memory_content:
+    messages.append(HumanMessage(content=memory,  id=f"{stable_id}__memory",
+        additional_kwargs={"hide_from_ui": True, "dynamic_context_reminder": True}))
+messages.append(HumanMessage(content=original.content, id=f"{stable_id}__user",
+        name=original.name, additional_kwargs=original.additional_kwargs))
+```
+
+**它怎么"就地替换"**:LangGraph 的 `add_messages` reducer 对**相同 id 的消息就地覆盖**。`SystemMessage` 取走了原始用户消息的 id,所以在消息列表里它**占据原始消息的位置/序号**;记忆块和真实用户输入用新 id(`__memory` / `__user` 后缀)追加在它后面。净效果是:每轮的用户输入前永远挂着同一组冻结的提醒,原始消息"没挪过窝"。
+
+**为什么必须用 SystemMessage 而非 HumanMessage 承载提醒**:提醒里有两类来源截然不同的数据,必须分角色——
+
+| 消息 | 内容 | ID | 角色 | 为什么 |
+|---|---|---|---|---|
+| `SystemMessage` | `<system-reminder><current_date>…</current_date></system-reminder>` | **原始用户消息 id** | 框架权威 | 日期是框架数据,由系统生成,可安全放进 system role;占原始 id 实现就地替换 |
+| `HumanMessage`(可选) | `<memory>…</memory>` | `{原始id}__memory` | **role=user** | 记忆内容用户可影响,绝不能获得系统权限(安全红线 1) |
+| `HumanMessage` | 真正的用户输入 | `{原始id}__user` | role=user | 被替换后的真实消息,`name`/`additional_kwargs` 原样保留 |
+
+**`additional_kwargs` 三个标记的职责分工**(它们才是中间件的"私有协议"):
+
+| 标记 | 挂在谁身上 | 用途 |
+|---|---|---|
+| `hide_from_ui: True` | 三条注入消息 | 不参与对话显示,只进上下文 |
+| `dynamic_context_reminder: True` | SystemMessage + 记忆 HumanMessage | `is_dynamic_context_reminder` 靠它识别注入消息(**不用内容匹配**,用户消息里写 `<system-reminder>` 也不会被误认) |
+| `reminder_date: str` | **只挂 SystemMessage** | 权威日期(结构化、不可被用户内容伪造);记忆 HumanMessage 故意不携带——见 §11.3.2 日期权威来源 |
 
 **安全红线 1(OWASP LLM01,issue #3630)**:框架数据(日期)和用户可影响的数据(记忆)**分属不同角色**。日期进 `SystemMessage`(框架权威);记忆进 `HumanMessage`(role=user),**永远不携带系统权限**——否则用户可影响的记忆内容一旦放进 system role,就获得了超越输入的指令权。同理,系统上下文也绝不冒充用户输入。这条在 `_build_full_reminder` 的 docstring 里写得很明确:"memory stays at role:user"。
 
-**安全红线 2(防递归 ID 交换)**:`_is_user_injection_target` 拒绝任何 id 以 `__user` 结尾的消息。否则上一轮生成的 `{id}__user` 会被当成新的注入目标,产生 `id__user__user__user…` 的无限后缀膨胀和幽灵消息重放。
-
-#### 13.3.2 三种分支:首轮 / 同日 / 跨午夜
-
-`_inject` 用一个简单状态机决定做什么:
+**安全红线 2(防递归 ID 交换)**:`_is_user_injection_target` 拒绝任何 id 以 `__user` 结尾的消息(用 `endswith`,不是子串 `in`——避免误伤 id 中间恰好含 `__user` 的情况)。否则上一轮生成的 `{id}__user` 会被当成新的注入目标,产生 `id__user__user__user…` 的无限后缀膨胀和幽灵消息重放。`_is_user_injection_target` 的完整拒绝清单:
 
 ```
-last_date = _last_injected_date(messages)      # 读 additional_kwargs["reminder_date"]
-├─ last_date is None        → 首轮: 注入完整提醒(日期 + 记忆)
-├─ last_date == 今天        → 同日: 什么都不做(前缀缓存命中,零开销)
-└─ 否则(跨午夜)            → 只注入轻量日期更新(不含记忆),插到本轮用户消息前
+❌ 不是 HumanMessage
+❌ 已经是 dynamic-context reminder(id 以 __memory 结尾 或 带该标记)
+❌ name == "summary"(摘要消息,不注入)
+❌ id 以 __user 结尾        ← 安全红线 2
+✅ 其余 HumanMessage 都可作为注入目标
 ```
 
-跨午夜更新之所以**不重复注入记忆**:记忆块是会话冻结的,日期才是需要修正的东西。更新也**持久化**(记录 `reminder_date`),让新一天后续轮次看到一致的历史、不再重复注入。
+#### 11.3.2 三种分支:首轮 / 同日 / 跨午夜
 
-**日期权威来源**:`_last_injected_date` 优先读 `SystemMessage.additional_kwargs["reminder_date"]`(结构化、不可被用户内容伪造);仅对旧 checkpoint 退回解析 content,且**正则只跑在 `SystemMessage` 上**——记忆 `HumanMessage` 是用户可影响的,绝不对它做内容解析,堵死"用户在消息里伪造 `<current_date>`"的日期欺骗洞。
+`_inject` 用**反向扫描 + 一个状态机**决定做什么。先读"上次注入的日期",再和今天比:
 
-#### 13.3.3 异步路径:offload + 超时兜底
+```python
+last_date = _last_injected_date(messages)          # 反向扫描 messages
+current_date = datetime.now().strftime("%Y-%m-%d, %A")
+
+if last_date is None:                              # ── 首轮 ──
+    first_idx = next(i for i, m in enumerate(messages) if _is_user_injection_target(m))
+    return _make_reminder_and_user_messages(messages[first_idx],
+             *_build_full_reminder(runtime), reminder_date=current_date)
+if last_date == current_date:                      # ── 同日 ──
+    return None                                    # 什么都不做,前缀缓存命中
+# ── 跨午夜 ──
+last_human_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])))
+return _make_reminder_and_user_messages(messages[last_human_idx],
+         _build_date_update_reminder(), reminder_date=current_date)   # 无 memory_content
+```
+
+| 分支 | 触发 | 注入什么 | 目标消息 |
+|---|---|---|---|
+| **首轮** | 历史里没有注入过的日期(`last_date is None`) | **完整提醒**:日期 + 记忆 | **第一条**可注入的 HumanMessage |
+| **同日** | `last_date == current_date` | 什么都不做(返回 `None`) | — |
+| **跨午夜** | 日期变了 | **轻量日期更新**:只有日期,不含记忆 | **最后一条**可注入的 HumanMessage |
+
+三个关键设计:
+
+- **首轮找"第一个",跨午夜找"最后一个"**:首轮要插在最前(记忆是会话级快照,必须放在开头);跨午夜只修日期,插到当前轮的用户消息前即可,不打扰已冻结的会话前缀。
+- **跨午夜不重复注入记忆**:记忆块是会话冻结的,`last_date` 已经非 None 说明记忆早已注入过;真正需要修正的只有日期。日期更新也**持久化**(带 `reminder_date`),让新一天后续轮次看到一致的历史、不再重复注入。
+- **日期权威来源**:`_last_injected_date` 反向扫描时,优先读 `SystemMessage.additional_kwargs["reminder_date"]`(结构化、不可被用户内容伪造);仅对**旧 checkpoint**(在 `reminder_date` 字段出现前写入的)退回解析 content,且**正则 `_DATE_RE` 只跑在 `SystemMessage` 上**——记忆 `HumanMessage` 是用户可影响的,绝不对它做内容解析。这一条堵死了"用户在记忆内容里伪造 `<current_date>`"的日期欺骗洞(与 §11.3.1 安全红线 1 同源)。
+
+#### 11.3.3 异步路径:offload + 超时兜底
 
 `abefore_agent` 把 `_inject` 用 `asyncio.to_thread` 挪出事件循环,并套上 **`_INJECT_TIMEOUT_SECONDS = 5.0`** 硬超时:
 
-- `_inject` 里同步加载 `memory.json`(文件 IO),首次还可能触发 **tiktoken BPE 编码下载**(网络阻塞,最坏能到 OS TCP 超时 ~26 分钟,issue #3402)。
-- 若不 offload,这条 `before_model` 路径会卡死所有并发 HTTP handler(认证、SSE 心跳)。
-- 5 秒超时保证:启动期 warm-up 静默失败时,首个请求优雅降级(本次不注入新的动态上下文),而不是把整个网关拖挂。**已冻结在 checkpoint 里的旧记忆仍然在,只是不更新**。
+```python
+try:
+    result = await asyncio.wait_for(
+        asyncio.to_thread(self._inject, state, runtime),
+        timeout=_INJECT_TIMEOUT_SECONDS,
+    )
+except TimeoutError:
+    logger.warning("injection timed out (%.1fs); skipping new memory/date injection", _INJECT_TIMEOUT_SECONDS)
+    self._record_effective_memory(state, None, runtime)
+    return None
+self._record_effective_memory(state, result, runtime)
+return result
+```
 
-#### 13.3.4 每次 run 的记忆身份(接 §8.5)
+**为什么必须 offload**:`_inject` 内部有两件可能长时间阻塞的事——① 同步加载 `memory.json`(文件 IO);② 首次调用 tiktoken BPE 编码可能**触发编码下载**(网络阻塞,最坏能到 OS TCP 超时 ~26 分钟,issue #3402)。若不加 offload,这条 `before_agent` 路径会卡死**所有并发 HTTP handler**(认证、SSE 心跳),整个网关都跟着停。
 
-`_record_effective_memory` 在注入后执行:先定位"本 run 生效的记忆块"——要么来自**本次**注入更新的 `{id}__memory` 消息,要么是 checkpoint 里**已存在**的 `__memory` 消息(Gateway 会从不受信任的输入里剥掉动态上下文标记,所以用户无法用已知消息 ID 伪造记忆来源)。然后对它做 **SHA-256**,经 `journal.record_memory_context()` 记一条 `context:memory` run 事件(只存 hash,不重复存全文)。这就是 §8.5 说"知道每次 run 用了哪份记忆"的落点。
+**超时之后发生了什么**:这次**不注入新的动态上下文**(`None` 返回 = 本次不加提醒/记忆),请求优雅降级,而不是把网关拖挂。关键语义:**已冻结在 checkpoint 里的旧记忆仍然在**——那是对上一轮生效的冻结快照,不因本次超时而丢失,只是"不更新"而已。超时路径同样会走 `_record_effective_memory(state, None, runtime)`,保证每次 run 的记忆身份记录不缺失(见 §11.3.4)。
 
-### 13.4 `memory_flush_hook`:摘要压缩前的紧急冲刷
+#### 11.3.4 每次 run 的记忆身份(接 §8.5)
+
+`before_agent` / `abefore_agent` 在 `_inject` 之后都调用 `_record_effective_memory`——它的职责是定位"本 run 真正生效的记忆块",对它做 SHA-256,记一条 `context:memory` run 事件。
+
+**定位生效记忆块的两条路径**(`_effective_memory_message`):
+
+```
+路径 ① 本次注入产生:
+   update 是 dict 且有 messages → 在其中找 id 以 __memory 结尾
+   + 是 dynamic-context reminder + content 是 str 的 HumanMessage
+
+路径 ② checkpoint 里复用(跨 run 延续):
+   runtime.context 读 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+   (本次 run 开始前就已存在的消息 id 集合)
+   → 在 state 里找 id ∈ pre_existing_ids 且以 __memory 结尾的 HumanMessage
+```
+
+为什么路径 ② 只信"run 前就存在的 id":**Gateway 会从不受信任的输入里剥掉动态上下文的标记**(`dynamic_context_reminder` / `hide_from_ui`),所以用户无法伪造一条带这些标记的消息、再借用已知消息 ID 冒充记忆来源。路径 ① 覆盖"本 run 注入的新记忆",路径 ② 覆盖"延续下来的冻结记忆",两条合起来保证**每次 run 都能唯一确定它实际生效的那份记忆**。
+
+找到后执行:
+
+```python
+journal.record_memory_context(
+    content_sha256=hashlib.sha256(message.content.encode("utf-8")).hexdigest(),
+)
+```
+
+**只存 hash,不存全文**——`run_events` 里只有 `content_sha256` 一个字段,完整记忆文本留在 checkpoint,不重复落一份到事件流。生产消费方是 `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory`,运维拿 hash 跨 run 比对"这次用的记忆和上次是不是同一份"。
+
+### 11.4 `memory_flush_hook`:摘要压缩前的紧急冲刷
 
 摘要中间件在把旧消息压缩掉之前,会先触发 hook 列表;`memory_flush_hook` 就是其中一环:
 
@@ -1179,9 +1516,9 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
 | **绕过索引水位** | `bypass_watermark=True` | 紧急快照是"删前一次性截图",其自身长度如果计入水位会**倒退**对话水位(下次正常抽取会把已经压缩掉的内容当成新内容重抽);绕过它,快照与正常更新互不干扰 |
 | **与待处理正常更新共存** | 队列按 `(thread,user,agent)` + `bypass_watermark` 做匹配 key | 紧急冲刷**不覆盖**同 key 的待处理正常更新——覆盖会丢掉正常更新未抽取的尾部(若用户随后停止对话,那个尾部不会被下一轮补喂) |
 
-**子代理路径 `skip_memory_flush=True`**:`_create_summarization_middleware` 只在 `memory.enabled and not skip_memory_flush` 时挂上这个 hook。子代理构建链(`build_subagent_runtime_middlewares`)强制传 `skip_memory_flush=True`,因为子代理与父线程共享 `thread_id`——不跳过的话,子代理内部压缩也会把它的中转对话冲刷进**父线程**的持久记忆(与 13.1 里子代理不挂 `MemoryMiddleware` 是同一层防护,双保险)。
+**子代理路径 `skip_memory_flush=True`**:`_create_summarization_middleware` 只在 `memory.enabled and not skip_memory_flush` 时挂上这个 hook。子代理构建链(`build_subagent_runtime_middlewares`)强制传 `skip_memory_flush=True`,因为子代理与父线程共享 `thread_id`——不跳过的话,子代理内部压缩也会把它的中转对话冲刷进**父线程**的持久记忆(与 §11.1 里子代理不挂 `MemoryMiddleware` 是同一层防护,双保险)。
 
-### 13.5 分工边界:中间件 vs 后端
+### 11.5 分工边界:中间件 vs 后端
 
 一句话总结:**中间件管"何时、为谁捕获/注入",后端管"捕获到之后怎么做"**。
 
@@ -1191,7 +1528,7 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
 | 写 | `MemoryMiddleware` / `memory_flush_hook` 决定"何时捕获、身份是谁" | `filter_messages_for_memory` + `detect_signals` + `MemoryUpdateQueue`(debounce) + LLM 抽取 + 闸门 + 落盘(见 §4–§7) |
 | 错误处理 | 注入失败 → 空上下文,不打断对话(`_get_memory_context` 捕获 `MemoryManagerError`,除非 `failure_policy.read: fail_closed`) | 队列抽取失败 → 本次不记,水位不前进,下次对话重抽(降级不丢原则,见 §2) |
 
-这也是为什么写自定义后端时只动 `backends/`,两个中间件一行都不用改——它们与后端通过 `MemoryManager` 抽象契约(`add` / `get_context` / `add_nowait` / `aadd`)通信(见 §12)。
+这也是为什么写自定义后端时只动 `backends/`,两个中间件一行都不用改——它们与后端通过 `MemoryManager` 抽象契约(`add` / `get_context` / `add_nowait` / `aadd`)通信(见 §10)。
 
 ---
 
@@ -1231,12 +1568,6 @@ backend/.deer-flow/
         └── facts/                     ← 该 Agent 的事实桶
             └── {sha256(fact_id)[:2]}/ ← 分片前缀(2 位十六进制, 最多 256 个目录)
                 └── {fact_id}.md       ← 单条事实
-```
-
-升级/迁移时还可能出现的备份文件:
-
-```
-    ├── memory.json.v1.bak             ← v1→v2 迁移前自动备份的旧文件(迁移后保留)
 ```
 
 **要点**:
