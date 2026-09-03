@@ -63,6 +63,24 @@ class MemoryCallbacks:
         """Pre-LLM-call: mutate ``invoke_config`` (e.g. merge trace metadata)
         before the backend invokes the model. Default: no-op."""
 
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Post-LLM-call hook for host-owned observation. Default: no-op.
+
+        This callback keeps the vendorable DeerMem backend independent from
+        DeerFlow's extension API. It is invoked for both provider success and
+        failure, and backend callers isolate exceptions raised by an
+        implementation.
+        """
+
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
@@ -295,6 +313,36 @@ class MemoryManager(BaseModel):
         ``NotImplementedError``); backends that support clearing override.
         """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
+
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Cancel buffered memory-extraction work for a scope.
+
+        Backends without a debounce queue have nothing to cancel and inherit
+        the default ``0``. DeerMem drops matching pending contexts so a deleted
+        or cleared agent cannot be resurrected by a late timer fire.
+
+        Scope (must stay symmetric with ``clear_memory`` / storage buckets):
+
+        - ``user_id`` selects the user bucket. ``user_id=None`` means the
+          **legacy no-user root only**, never "every user in the process".
+        - ``agent_name=None`` cancels every agent bucket inside that user
+          scope (including the default/global bucket).
+        - An explicit ``agent_name`` cancels only that agent's pending
+          contexts inside the same user scope.
+
+        There is no "cancel the whole process-local queue" form of this
+        method; callers that need a broader sweep must iterate known user
+        scopes explicitly.
+
+        Returns:
+            Number of pending contexts cancelled. Default: ``0``.
+        """
+        return 0
 
     def import_memory(
         self,
@@ -623,6 +671,13 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
     langfuse is not an enabled tracing provider.
     """
 
+    def __init__(self, *, extensions=None) -> None:
+        if extensions is None:
+            from deerflow.extensions import get_loaded_extensions
+
+            extensions = get_loaded_extensions()
+        self._extensions = extensions
+
     def on_memory_llm_call(
         self,
         invoke_config: dict[str, Any],
@@ -643,6 +698,60 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=trace_id,
         )
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Forward a DeerMem provider result using the captured snapshot."""
+        extensions = self._extensions
+        if not extensions.has_system_model_observers:
+            return
+        try:
+            from deerflow_extension_api import (
+                SystemModelRequest,
+                SystemModelResult,
+                SystemOperationKind,
+            )
+
+            from deerflow.extensions.notify import (
+                dispatch_system_model_observation,
+                notify_system_model_call,
+                task_store_for_system_call,
+            )
+
+            dispatch_system_model_observation(
+                notify_system_model_call(
+                    extensions,
+                    task_store_for_system_call(invoke_config),
+                    SystemOperationKind.MEMORY,
+                    SystemModelRequest(
+                        messages=prompt,
+                        model_name=model_name,
+                        invoke_config=invoke_config,
+                    ),
+                    SystemModelResult(
+                        response=response,
+                        error=error,
+                        duration_ms=duration_ms,
+                    ),
+                ),
+                SystemOperationKind.MEMORY.value,
+            )
+        except Exception:
+            # Only the bridge's own failures are non-fatal. A teardown signal
+            # must propagate, matching the boundary the DeerMem-side call
+            # site documents and tests.
+            logger.warning(
+                "Extension observation of the memory model call failed (non-fatal)",
+                exc_info=True,
+            )
 
 
 def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
@@ -752,12 +861,12 @@ def _collect_host_hooks() -> dict[str, Any]:
     of its own) -- building an unused default on every startup would waste
     time. The others are direct values (cheap function refs).
     """
-    from deerflow.trace_context import request_trace_context
+    from deerflow.trace_context import ensure_trace_context
 
     return {
         "callbacks": LangfuseMemoryCallbacks(),
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
-        "trace_context_manager": request_trace_context,
+        "trace_context_manager": ensure_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
     }
