@@ -12,25 +12,101 @@ provider 直接 400）。
 | 3 | `ToolResultSanitizationMiddleware` | 工具执行**结果侧** | 远程抓取内容伪造框架标签 | — |
 | 7 | `DanglingToolCallMiddleware` | 模型调用入站（最内层补丁） | 悬挂调用 / 孤儿结果 / 畸形调用 | #2894 |
 
-辅助模块：`tool_output_synopsis.py`（确定性的工具输出概要生成器）、`tool_call_metadata.py`
-（保持 AIMessage 原始 provider tool-call 元数据同步）。同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`
-（issue #3857，链上第 11 位）不在本文件范围，但第 2 节会讲到它与外化文件的接口。
+辅助模块：`tool_output_synopsis.py`（确定性的工具输出概要生成器）、`tool_call_metadata.py`（保持 AIMessage 原始 provider tool-call 元数据同步）。
+同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`（issue #3857，链上第 11 位）不在本文件范围，但第 2 节会讲到它与外化文件的接口。
 
 ---
 
-## 0. 先建立心智模型：wrap 的嵌套方向决定一切
+## 0. 先建立心智模型：中间件能钩在环上的哪道缝
 
-四个中间件都继承 `langchain.agents.middleware.AgentMiddleware`；Agent 本体是 LangGraph 图。
-它们只用两类钩子，理解这两类钩子的语义差异是本文件的地基：
+`AgentMiddleware`（本文件四个主角与整个 middleware-* 系列都继承自
+`langchain.agents.middleware.AgentMiddleware`）的全部威力，在于**你选择在 Agent 循环的哪道缝打孔**。
+Agent 本体是 LangGraph 图，一条消息从用户到最终回复，旅程上有固定几处可打孔的缝：
 
-- **`wrap_model_call(request, handler)` / `awrap_model_call`**——包裹**每一次模型调用**。可改写
-  `ModelRequest.messages` 再 `handler(request)` 交给内层/模型。LangChain 按装配顺序把链排成
-  **外层→内层**：先装配的最外层。改写只作用于**本次请求**（per-request），**永不写回 checkpoint
-  state**——想持久化必须显式返回 state 更新或 `Command`，模型调用钩子没有这个通道。
-- **`wrap_tool_call(request, handler)` / `awrap_tool_call`**——包裹**工具执行**。`handler(request)`
-  跑完整条内链直到真实工具；返回后可改写结果：替换 `ToolMessage`，或返回带
-  `Command(update={"messages": [...]})` 追加消息。注意：**工具侧钩子的返回值会经 `add_messages`
-  落进图状态**——与模型侧钩子最本质的差别（外化是持久事件，净化/修复是瞬时事件）。
+```
+before_agent                          ← 每 run 一次（入口节点）
+  └→ before_model                     ← 每轮模型调用前（状态节点）
+       └→ [wrap_model_call 洋葱]      ← 包裹模型请求：改造载荷/重试/短路
+            └→ model(provider)
+       └→ after_model                 ← 每轮模型调用后（状态节点，逆装配序）
+            ├→ 模型想调工具? → 每个工具执行被 [wrap_tool_call 洋葱] 包裹
+            │                       → 结果 ToolMessage 回到 state
+            └→ 该收手?  → 跳工具节点 / 跳回 model / 跳出到 after_agent
+  └→ after_agent                      ← 每 run 一次（出口节点）
+```
+
+### 0.1 钩子全景：六组方法，两大类语义
+
+钩子分两类、四道缝，每组方法都有**同步/异步两个版本**，异步同名加 `a` 前缀（`before_model` →
+`abefore_model`、`wrap_model_call` → `awrap_model_call`）。只实现其中一版也能工作，但 LangChain
+按调用语境选用（同步 `invoke`/`stream` 走同步钩子、`ainvoke`/`astream` 走异步钩子），缺的那版
+在相应语境下抛 `NotImplementedError`。
+
+**状态钩子（graph 节点语义）**：形如 `(state, runtime) -> dict | None`。每个实现者被编译成图里
+**一个独立节点**；返回的 dict 按 channel 并入 state。特点：看得见 state 全貌、写的是**跨步骤存活**
+的 state（落 checkpoint、被后续节点与后续轮次观察）、还握有路由权（返回 dict 里声明的
+`jump_to` 可配 `hook_config(can_jump_to=...)` 编译成条件边）。
+
+| 钩子 | 触发 | 典型用途 | 仓库实例 |
+|---|---|---|---|
+| `before_agent` / `abefore_agent` | 每 run 一次，Agent 循环启动前 | 一次性 setup；把"初始化即应持久"的东西写进 state | ThreadData 建线程目录、Uploads 注入上传清单、SandboxMiddleware `acquire` 后存 `sandbox_id`、TodoList 建初始计划 |
+| `after_agent` / `aafter_agent` | 每 run 一次，循环收尾后 | 资源释放、run 级结论回写、把消息排队给旁路系统 | SandboxMiddleware `release`、Memory 排队异步记忆抽取 |
+| `before_model` / `abefore_model` | 每轮模型调用前 | 站在 state 上"为这一轮做准备"：压缩/改写历史、写一个让本轮可见的决定 | Summarization 判定并执行压缩、McpRouting 写入 minimal `promoted` state 让延迟工具本轮可见 |
+| `after_model` / `aafter_model` | 每轮模型调用后 | 读本轮 AIMessage 做**终局判断与记账**：该不该停/该不该放行工具、打标、归因、弃用不需要的兄弟调用 | SafetyFinishReason 检测安全终止并抑制工具、ModelLength 记 `model_length_capped`、TokenUsage 归因、Title 起标题、Clarification 丢弃同轮 sibling、LoopDetection 识别重复调用并硬停 |
+
+**包裹钩子（洋葱语义）**：形如 `(request, handler) -> response`。不编译成独立节点，而是**嵌套在
+"模型节点"/"工具节点"内部**的一条调用链：由你决定 `handler(request)` 何时被调、被调几次、带着
+什么载荷去、以及返回什么结果。装配顺序排成**外层→内层，先装配 = 最外层**——最外层的包裹钩子
+先看到原始请求，其改写是所有内层（含重试）共享的干净视图。
+
+| 钩子 | 触发 | 典型用途 | 仓库实例 |
+|---|---|---|---|
+| `wrap_model_call` / `awrap_model_call` | 包裹每一次模型请求 | 只改"发给模型这一份"的载荷（不落盘），或对调用本身做重试/短路/降级 | InputSanitization(#1) 净化、ViewImage 注入 base64、SkillActivation 注入 SKILL.md 正文、Dangling(#7) 补配对、SystemMessageCoalescing 合并系统消息、ToolOutputBudget 模型侧截历史巨文、LLMErrorHandling 重试归一、TerminalResponse 空回复重试一次 |
+| `wrap_tool_call` / `awrap_tool_call` | 包裹每一次工具执行 | 执行前拦截（放不放行、改不改参），执行后改写结果 | ReadBeforeWrite 读改写门、SandboxAudit 审计、SkillToolPolicy 拦越权执行、ToolResultSanitization(#3) 中和、ToolOutputBudget 工具侧外化、ToolProgress/ToolReceipt 打标计时、Clarification 用 `Command(goto=END)` 中断问人 |
+
+一个中间件可以同时实现多组钩子：ToolOutputBudget 左右开弓（工具侧外化 + 模型侧兜底），
+DurableContext 三种都用（`before/after_model` 维护持久上下文 + `wrap_model_call` 做 per-request
+投影），Clarification 是 `after_model` 丢 sibling + `wrap_tool_call` 中断的组合。
+
+### 0.2 选钩子的两把尺子
+
+**尺子一：你拦的是"状态层"还是"通道层"？** 要写的是跨步骤存活的**事实/状态**（记一笔账、建一个
+计划、缓存一个决定、插入/删掉一条历史消息）→ 状态钩子；要拦的是**流经通道的具体载荷**（发给模型
+的那份消息长什么样、这次工具调用该不该放行、工具的原始结果以什么形态回传）→ 包裹钩子。注意
+`wrap_tool_call` 落在通道上，但其返回值作为工具节点输出照常落历史——它同时是"通道拦截器"和
+"持久写手"。
+
+**尺子二：你的改动要不要落 checkpoint？** 决定权其实在**你动手的对象**，不在中间件"想不想持久"：
+
+- 改 `request.messages`（`wrap_model_call` 请求侧）→ 只在本次请求内存里生效，**永不写回 checkpoint
+  state**。想"临时给模型看一段、但不想让这段留在历史/被重复发送"——base64 图片、SKILL.md 正文、
+  当轮净化后的干净视图——只有这道缝做得到。
+- 改返回的**响应/结果**（`wrap_model_call` 返回的模型消息、`wrap_tool_call` 返回的 `ToolMessage`/
+  `Command`）→ 和正常产出一样经 `add_messages` 落进图状态，**持久事件**。本文件里 #1、#7 净化和
+  补配对都发生在请求侧所以是瞬时的，而 #3 中和、#2 外化的对象是工具**结果**所以落盘——差异的本质
+  是改造对象，不是中间件的意图。
+- 状态钩子返回的 dict 并入 state → 同样持久，且因它是独立图节点、写入被其他节点看到。
+
+对照速记：**要一次性的干净视图 → 请求侧 `wrap_model_call`；要持久的结果改写 → `wrap_tool_call`
+响应侧；要跨步骤记账/路由 → 状态钩子。**
+
+### 0.3 洋葱方向不止属于 wrap：after_* 按逆装配序执行
+
+前向阶段（`before_agent`/`before_model` 与 wrap 的请求进入）都按**装配序**执行：先装配的先动，
+即最外层。但后向阶段不一样——`wrap` 的响应回卷是嵌套天然逆序；而 `after_model`/`after_agent`
+是 LangChain 编译成图节点时**刻意从最后一个倒着连边**，效果是**最晚注册的先执行**，与 wrap 栈
+回卷对齐到同一个洋葱：外层中间件的"善后"总是晚于内层。仓库里现成的证据：SafetyFinishReason
+注册在 lead 链最尾，靠这条逆序 `after_model` 反而**第一个**跑，好让它对安全终止的抑制先于外层
+中间件可见（见 middlewares/AGENTS.md 的注释）。
+
+### 0.4 本文件四个主角为什么只用 wrap 两类钩子
+
+四个中间件守卫的都是**通道字节**（进/出模型的载荷、工具结果回传的原始字节），而状态钩子够不着
+这些：等 `after_model` 能读到工具结果时，它早已作为 ToolMessage 落进 state，你既拿不到"执行前
+改写调用"的机会，也无法把一次**不落盘的净化**只施加给本次请求。所以净化类选请求侧 `wrap_model_call`
+（#1、#7 要的就是"只这一份干净，checkpoint 留原貌"），结果改写类选 `wrap_tool_call`（#2、#3 的
+产物要持久）。这四个只用两类钩子是这个原则的推论，不是钩子面本身就这么窄——本系列其余文件会用到
+状态钩子，判断"钩在哪道缝"的标准始终是 0.2 的两把尺子。
 
 中间件链的装配见 `tool_error_handling_middleware.py::_build_runtime_middlewares`（lead 与 subagent
 共享基座），编号即物理顺序，链末有 `deerflow.extensions.ordering` 一次性校验顺序不变量，任何
