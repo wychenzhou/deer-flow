@@ -1,15 +1,16 @@
-# 视觉注入、MCP 路由提升、延迟工具过滤与系统消息合并（23-26）深度解析
+# 视觉注入 · MCP 路由提升 · 延迟工具过滤 · 系统消息合并（链位 23、24、25、26）
 
-本文件解析 Lead Agent（及子 Agent 复用）链末段的四个中间件。它们不参与沙箱/审计/执行，而是站在**模型请求边界**回答四个不同的问题：多模态模型怎么"看到"图片、海量 MCP 工具 schema 怎么不把上下文塞爆、"工具被提升"由谁说了算、严格后端为何拒绝"不在开头"的 SystemMessage。
+> 本篇解析 Lead Agent（及子 Agent 复用）链末段的四个中间件。它们不参与沙箱/审计/执行，而是站在**模型请求边界**回答四个不同的问题：多模态模型怎么「看到」图片、海量 MCP 工具 schema 怎么不把上下文塞爆、「工具被提升」由谁说了算、严格后端为何拒绝「不在开头」的 SystemMessage。四个中间件的共同气质是 **per-request 化**：能不进 checkpoint 的 payload 一律不进（base64、合并后的 system 块），只写最小状态通道（`promoted`），并在每次模型调用前自清扫/自重建。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
 
-四个中间件的共同气质是 **per-request 化**：能不进 checkpoint 的 payload 一律不进（base64、合并后的 system 块），只写最小状态通道（`promoted`），并在每次模型调用前自清扫/自重建。先记这张对照表：
+## 本文件覆盖的中间件
 
-| 中间件 | 链位 | 装配条件 | 主钩子 | 产物落点 |
-|--------|------|---------|--------|---------|
-| `ViewImageMiddleware` | 23 | 模型 `supports_vision` | `wrap_model_call` | 仅改 `ModelRequest.messages`，无状态写入 |
-| `McpRoutingMiddleware` | 24 | `tool_search.enabled` 且有 PR1 路由索引 | `before_model` | 最小 `state["promoted"]` 更新 |
-| `DeferredToolFilterMiddleware` | 25 | `tool_search.enabled` 且有延迟工具 | `wrap_model_call` + `wrap_tool_call` | 裁剪 schema / 拦截调用，无状态写入 |
-| `SystemMessageCoalescingMiddleware` | 26 | 恒装配（lead 与 subagent） | `wrap_model_call` | 仅改请求的 `system_message`/`messages` |
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
+|---|---|---|---|---|
+| 23 | `ViewImageMiddleware` | 多模态图片临时注入，base64 不进 checkpoint | `wrap_model_call` | 模型 `supports_vision` |
+| 24 | `McpRoutingMiddleware` | 从最新用户文本猜意图，提前提升延迟 MCP 工具 | `before_model` | `tool_search.enabled` 且 PR1 路由索引 |
+| 25 | `DeferredToolFilterMiddleware` | 延迟工具 schema 隐藏 / 拦截绕过调用 | `wrap_model_call` + `wrap_tool_call` | `tool_search.enabled` 且构建期有延迟工具 |
+| 26 | `SystemMessageCoalescingMiddleware` | 合并所有 SystemMessage 到开头唯一一块 | `wrap_model_call` | 恒装配（lead + subagent） |
 
 装配位置：lead 链在 `agents/lead_agent/agent.py::build_middlewares`（Memory 之后、SubagentLimit 之前）依序 append；subagent 运行时在 `agents/middlewares/tool_error_handling_middleware.py::_build_runtime_middlewares` 镜像同一顺序。**钩子选择规律**：要写图状态就用 `before_model`（McpRouting 的产物就是 `promoted`）；要改最终 request payload 就用 `wrap_model_call`（ViewImage 的 HumanMessage、Coalescing 的合并块都只在请求里存活）。看一个中间件用什么钩子，先问"它的产物住在哪里"。
 

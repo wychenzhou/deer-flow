@@ -1,8 +1,22 @@
-# 安全守卫与终止性中间件(深度教学)
+# 安全守卫与终止性中间件：限额 · 死循环 · 预算 · 兜底（链位 27–35）
 
-本文深度拆解 Lead Agent(及子 Agent)运行时中负责**终止性(termination)**与**收尾语义**的七个中间件, 即链位置 27–35 的 `SubagentLimitMiddleware`、`LoopDetectionMiddleware`、`TokenBudgetMiddleware`、`TerminalResponseMiddleware`、`ModelLengthFinishReasonMiddleware`、`SafetyFinishReasonMiddleware`、`ClarificationMiddleware`, 以及支撑它们的辅助模块(`safety_termination_detectors.py`、`model_length_termination_detectors.py`、`_bounded_dict.py`、`tool_call_metadata.py`)。
+> 本篇拆解 Lead Agent（及子 Agent）运行时中负责**终止性（termination）**与**收尾语义**的中间件：子代理限额、死循环硬停、token 预算硬停、安全/长度终止记账、空终态兜底、人机澄清。它把「失控 / 半途而废 / 空转」的 run 掐断或如实收尾，配合加法 `stop_reason` 给每次提前结束记账，并用 `after_model` 反向分派保证收尾顺序的正确性。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与[目录索引](README.md)。
+> 阅读前提：先弄懂「链上顺序即正确性」（`agents/middlewares/AGENTS.md`）与「after_model 钩子反向分派」（本篇 §0.3）。
 
-本文是 `docs-local/harness-strategies-agent-execution.md` §9.1「终止性:三层护栏」的逐文件展开。阅读前提:先弄懂两件事——**链上顺序即正确性**(`agents/middlewares/AGENTS.md` "Middleware Chain" 章节),以及 **after_model 钩子的反向分派**(§0.3,那是理解 32→35 收尾顺序的钥匙)。正文用真实 issue 号标注"坑"的出处(#3875 / #4176 / #3028 / #4393 / #4271 / #4027),便于追溯动机。
+## 本文件覆盖的中间件
+
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
+|---|---|---|---|---|
+| 27 | `SubagentLimitMiddleware` | 子代理并发/总量截断 | `after_model` | `subagent_enabled` |
+| 28 | `LoopDetectionMiddleware` | 重复 tool_calls 死循环硬停 | `after_model` + `wrap_model_call` | `loop_detection.enabled` |
+| 29 | `TokenBudgetMiddleware` | 单 run token 预算硬停 | `before_agent`/`after_model`/`wrap_model_call` | `token_budget.enabled`（默认关） |
+| 32 | `TerminalResponseMiddleware` | 空终态重试一次/兜底 | `after_model` + `wrap_model_call` | 恒装配 |
+| 33 | `ModelLengthFinishReasonMiddleware` | 长度截断记账（不改写） | `after_model` | 恒装配 |
+| 34 | `SafetyFinishReasonMiddleware` | 安全终止抑制工具/回填空内容 | `after_model` | `safety_finish_reason.enabled`（默认开） |
+| 35 | `ClarificationMiddleware` | 澄清中断等用户（必须最后） | `wrap_tool_call` + `after_model` | 恒装配 |
+
+> 30、31（自定义 / 配置扩展中间件插入点）只讲装配语义、不属深挖对象，本篇 §0.2 说明它们的插入约束。支撑模块：`safety_termination_detectors.py`、`model_length_termination_detectors.py`、`_bounded_dict.py`、`tool_call_metadata.py`。
 
 ---
 

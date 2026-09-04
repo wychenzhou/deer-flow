@@ -1,9 +1,17 @@
-# 对话管理中间件深度教学：压缩 / 待办 / Token 归因 / 标题 / 记忆
+# 对话管理中间件：压缩 · 待办 · token 归因 · 标题 · 记忆（链位 18、19、20、21、22）
 
-> 本文深度讲解 DeerFlow harness 中负责「对话生命周期管理」的五款中间件：**DeerFlowSummarizationMiddleware（上下文压缩）、
-> TodoMiddleware（待办追踪）、TokenUsageMiddleware（Token 归因）、TitleMiddleware（标题生成）、MemoryMiddleware（记忆入队）**。
-> 阅读前提：LangChain `AgentMiddleware` 钩子模型（`before_model`/`after_model`/`wrap_model_call`、`jump_to`）、
-> LangGraph checkpoint 与消息 reducer、以及 `docs-local/harness-strategies-agent-execution.md` 第 2/5/7 节的概念。
+> 本篇讲解负责「对话生命周期管理」的五款中间件：上下文压缩、待办追踪、token 归因、标题生成、记忆入队。它们都长在 lead-only 追加段，共同前提是用同一套「真实用户消息」身份排除框架噪音。阅读前提：LangChain `AgentMiddleware` 钩子模型（`before_model`/`after_model`/`wrap_model_call`、`jump_to`）、LangGraph checkpoint 与消息 reducer、以及 `docs-local/harness-strategies-agent-execution.md` 第 2/5/7 节的概念。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
+
+## 本文件覆盖的中间件
+
+| 链位 | 类 | 一句话职责 | 主钩子 | 装配条件 |
+|---|---|---|---|---|
+| 18 | `DeerFlowSummarizationMiddleware` | 上下文逼近上限时把早期消息压缩成摘要 | `before_model` | `summarization.enabled`（默认关） |
+| 19 | `TodoMiddleware` | 维护待办清单，防压缩丢待办、防带未完成待办草草收场 | `before_model`/`after_model`/`wrap_model_call` | `is_plan_mode` |
+| 20 | `TokenUsageMiddleware` | 记录每次模型调用用量，子代理用量归因到派发它的 AI 消息 | `after_model` | `token_usage.enabled` |
+| 21 | `TitleMiddleware` | 首轮完整交换后自动给 thread 起标题 | `after_model` | 恒装配（生成时按 `title.enabled` 判定） |
+| 22 | `MemoryMiddleware` | 整轮结束后把原始消息投进记忆队列（异步提取） | `after_agent` | 非 tool-mode；tool-mode 仅当后端要求被动写入 |
 
 ---
 

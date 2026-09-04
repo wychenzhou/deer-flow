@@ -7,7 +7,7 @@
 
 | 路径 | 内容 |
 |------|------|
-| `middleware/` | 中间件源码详解（8 篇，中文） |
+| `middleware/` | 中间件源码详解（8 篇，中文）；含[总索引](middleware/README.md)——链位 1–35 → 篇目映射 |
 | `STARTUP.md` | 项目启动指南（中文） |
 | `warm-sun-theme-plan.md` / `warm-sun-theme-design.md` | 活力暖阳主题实施计划与设计规范 |
 | `checkpoint-tables.md` | LangGraph Checkpoint 表结构详解 |

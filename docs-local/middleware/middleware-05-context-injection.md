@@ -1,6 +1,16 @@
-# 上下文注入中间件：注入即改写（DynamicContext · SkillActivation · SkillToolPolicy · DurableContext）
+# 上下文注入中间件：动态日期 · 技能激活 · 技能策略 · 持久上下文（链位 14、15、16、17）
 
-> 本文件深度解析 harness 链上四个「把东西塞进模型请求」的中间件：`DynamicContextMiddleware`（14）、`SkillActivationMiddleware`（15）、`SkillToolPolicyMiddleware`（16）、`DurableContextMiddleware`（17）。它们都在做**消息注入或工具改写**，却各面对一组不同的坑：前缀缓存被破坏、记忆获得系统权威、技能权限边界模糊、压缩冲掉委派账本。这四个文件是理解 DeerFlow「**静态系统提示 + 后置注入**」「**信任分层**」「**顺序即正确性**」三条主线的标本。代码引用为仓库相对路径，主文件位于 `backend/packages/harness/deerflow/agents/middlewares/`；链装配见 `agents/middlewares/AGENTS.md` 与 `agents/lead_agent/agent.py::build_middlewares`（lead-only 在 base 1–13 之后按序追加）。
+> 本篇解析链上四个「把东西塞进模型请求」的中间件。它们都在做**消息注入或工具改写**，却各面对一组不同的坑：前缀缓存被破坏、记忆获得系统权威、技能权限边界模糊、压缩冲掉委派账本。这四个文件是理解 DeerFlow「**静态系统提示 + 后置注入**」「**信任分层**」「**顺序即正确性**」三条主线的标本。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
+
+## 本文件覆盖的中间件
+
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
+|---|---|---|---|---|
+| 14 | `DynamicContextMiddleware` | 日期/记忆一次性冻结注入首条用户消息 | `before_agent` | lead-only；subagent 用 `SubagentDateContextMiddleware` |
+| 15 | `SkillActivationMiddleware` | 斜杠技能激活 + 正文注入 + 密钥绑定 | `wrap_model_call`（每次） | 斜杠激活系统 |
+| 16 | `SkillToolPolicyMiddleware` | 激活技能 allowed-tools 裁 schema / 拦执行 | `wrap_model_call` + `wrap_tool_call` | 技能策略系统 |
+| 17 | `DurableContextMiddleware` | 委派/技能引用压缩前捕获并投影 | `before_model`/`after_model`/`wrap_model_call` | lead + subagent |
 
 ---
 

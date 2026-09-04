@@ -1,19 +1,19 @@
-# I/O 安全中间件：模型输入/输出通道上的四道防线
+# I/O 安全中间件：模型输入/输出通道的净化 · 预算 · 配对（链位 1、2、3、7）
 
-本文件深讲 DeerFlow harness 中间件链上守护「模型输入/输出通道」的四个中间件（链上编号 1、2、3、7，
-外加两个辅助模块），回答三个底层问题：**进模型的内容可不可信**（用户输入与远程网页都可能伪造框架
-上下文）、**体量合不合理**（巨型工具输出撑爆上下文）、**结构对不对**（调用与结果不配对时严格
-provider 直接 400）。
+> 这四个中间件守在「进/出模型的通道」上，共同回答三个底层问题：**进模型的内容可不可信**（用户输入与远程网页都可能伪造框架上下文）、**体量合不合理**（巨型工具输出撑爆上下文）、**结构对不对**（调用与结果不配对时严格 provider 直接 400）。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 [目录索引](README.md)。
+> 同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`（#3857，链位 11）不在本篇范围，见 [04](middleware-04-file-safety.md)。
 
-| 链上编号 | 中间件 | 侧翼 | 攻击面/故障面 | 关键 issue |
-|------|--------|------|--------------|-----------|
-| 1 | `InputSanitizationMiddleware` | 模型调用**入站** | 用户消息伪造框架标签 | #3630 |
-| 2 | `ToolOutputBudgetMiddleware` | 工具执行**结果侧** + 模型调用入站 | 超大工具输出 | #3416 |
-| 3 | `ToolResultSanitizationMiddleware` | 工具执行**结果侧** | 远程抓取内容伪造框架标签 | — |
-| 7 | `DanglingToolCallMiddleware` | 模型调用入站（最内层补丁） | 悬挂调用 / 孤儿结果 / 畸形调用 | #2894 |
+## 本文件覆盖的中间件
+
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 攻击面/故障面 | 关键 issue |
+|---|---|---|---|---|---|
+| 1 | `InputSanitizationMiddleware` | 净化用户输入、中和框架标签 | `wrap_model_call`（最外） | 用户消息伪造框架标签 | #3630 |
+| 2 | `ToolOutputBudgetMiddleware` | 超预算工具结果外化/截断 | `wrap_tool_call` + `wrap_model_call` | 超大工具输出 | #3416 |
+| 3 | `ToolResultSanitizationMiddleware` | 中和远程抓取内容的注入标签 | `wrap_tool_call` | 远程抓取内容伪造框架标签 | — |
+| 7 | `DanglingToolCallMiddleware` | 补配对 / 丢孤儿 / 修畸形调用 | `wrap_model_call`（最内） | 悬挂调用 / 孤儿结果 / 畸形调用 | #2894 |
 
 辅助模块：`tool_output_synopsis.py`（确定性的工具输出概要生成器）、`tool_call_metadata.py`（保持 AIMessage 原始 provider tool-call 元数据同步）。
-同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`（issue #3857，链上第 11 位）不在本文件范围，但第 2 节会讲到它与外化文件的接口。
 
 ---
 

@@ -1,14 +1,17 @@
-# 基础设施层中间件：线程目录 · 上传上下文 · 沙箱生命周期
+# 基础设施层中间件：线程目录 · 上传上下文 · 沙箱生命周期（链位 4、5、6）
 
-本文件深度讲解三个「基础设施」中间件：它们不做拦截/改写，而是在 **agent 思考之前把运行环境准备好**——为 `(user, thread)` 建私有目录、把刚上传的文件变成模型可读的上下文、保证背后有一个身份对整条图可见的活沙箱。
+> 这三个中间件不做拦截/改写，而是在 **agent 思考之前把运行环境准备好**——为 `(user, thread)` 建私有目录、把刚上传的文件变成模型可读的上下文、保证背后有一个身份对整条图可见的活沙箱。
+> 源码相对路径：`backend/packages/harness/deerflow/`（`agents/middlewares/*`、`sandbox/middleware.py`）；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 [目录索引](README.md)。
 
-| 链位 | 中间件 | 一句话职责 | 默认行为 | 它防住的坑 |
-|-----|--------|-----------|---------|-----------|
-| 4 | `ThreadDataMiddleware` | 为 `(user, thread)` 解析/创建目录并把路径写进 state | `lazy_init=True` 只算路径 | 多用户/线程文件串台、容器 UID 权限、目录穿越 |
-| 5 | `UploadsMiddleware`（lead only） | 把**当前这轮**新上传文件以 `<current_uploads>` 块注入最新 HumanMessage | 每节最多列 10 个 | 上传污染记忆、注入面、上下文膨胀 |
-| 6 | `SandboxMiddleware` | 沙箱获取/保留/释放，并把懒初始化产生的 `sandbox_id` 发布进 state | `lazy_init=True` 首用才获取 | 懒状态下游不可见、重复释放/跨 owner、provider 并发撕裂 |
+## 本文件覆盖的中间件
 
-三者共享两块地基：`Paths`（`config/paths.py`）与 `resolve_runtime_user_id()`（`runtime/user_context.py`）。先讲透它们，后面所有路径/桶的代码就都能读懂。
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 默认行为 | 它防住的坑 |
+|---|---|---|---|---|---|
+| 4 | `ThreadDataMiddleware` | 为 `(user, thread)` 解析/创建目录并把路径写进 state | `before_agent` | `lazy_init=True` 只算路径 | 多用户/线程文件串台、容器 UID 权限、目录穿越 |
+| 5 | `UploadsMiddleware`（lead only） | 把**当前这轮**新上传文件以 `<current_uploads>` 块注入最新 HumanMessage | `before_agent` | 每节最多列 10 个 | 上传污染记忆、注入面、上下文膨胀 |
+| 6 | `SandboxMiddleware` | 沙箱获取/保留/释放，并把懒初始化产生的 `sandbox_id` 发布进 state | `before_agent`/`after_agent`/`wrap_tool_call` | `lazy_init=True` 首用才获取 | 懒状态下游不可见、重复释放/跨 owner、provider 并发撕裂 |
+
+三者共享两块地基：`Paths`（`config/paths.py`）与 `resolve_runtime_user_id()`（`runtime/user_context.py`），见本篇 §0。
 
 ---
 ## 0. 共享地基：Paths 与身份解析

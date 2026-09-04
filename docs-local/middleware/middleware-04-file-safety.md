@@ -1,13 +1,16 @@
-# 文件安全与停滞守卫:ReadBeforeWriteMiddleware × ToolProgressMiddleware 深度教学
+# 文件安全与停滞守卫：ReadBeforeWrite × ToolProgress（链位 11、12）
 
-> 本文档深入拆解 harness 中间件链上**相邻的两个可选中间件**:
->
-> - `ReadBeforeWriteMiddleware`(链第 11 位)——**文件写入门禁(版本门)**,issue #3857
-> - `ToolProgressMiddleware`(链第 12 位)——**工具结果质量守卫(停滞状态机)**,RFC #3177
->
-> 前者防"**盲写**"(基于过期内容改文件,破坏正确性),后者防"**停滞**"(有输出但没新信息,
-> 烧 token 空转)。一个管文件一致性,一个管投入产出;都长在"工具调用"这条垂直切面上,
-> 共享同一套 `deerflow_tool_meta` 元数据语言,所以放在一起讲。
+> 本篇拆解链上**相邻的两个可选中间件**：`ReadBeforeWriteMiddleware`（**文件写入门禁/版本门**，issue #3857）防「**盲写**」（基于过期内容改文件、破坏正确性）；`ToolProgressMiddleware`（**工具结果质量守卫/停滞状态机**，RFC #3177）防「**停滞**」（有输出但没新信息、烧 token 空转）。一个管文件一致性，一个管投入产出；都长在「工具调用」这条垂直切面上，共享同一套 `deerflow_tool_meta` 元数据语言，所以放在一起讲。
+> 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与[目录索引](README.md)。
+
+## 本文件覆盖的中间件
+
+| 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
+|---|---|---|---|---|
+| 11 | `ReadBeforeWriteMiddleware` | 写入门：读过的版本哈希匹配才放行写 | `wrap_tool_call` | `read_before_write.enabled`（默认开） |
+| 12 | `ToolProgressMiddleware` | (thread,tool) 停滞状态机：warn → block | `wrap_tool_call` + `wrap_model_call` + `before_agent` | `tool_progress.enabled`（默认关） |
+
+两个主角共享 `deerflow_tool_meta`（`middlewares/tool_result_meta.py`）——ToolProgress 能读懂结果质量，前提是每个结果都带结构化元数据。
 
 ---
 
