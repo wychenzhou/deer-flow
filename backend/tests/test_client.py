@@ -23,6 +23,7 @@ from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
 from deerflow.client import DeerFlowClient
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
@@ -621,6 +622,56 @@ class TestStream:
         call_kwargs = agent.stream.call_args.kwargs
         assert "messages" in call_kwargs["stream_mode"]
 
+    def test_stream_emits_streamed_tool_calls_once_with_complete_args(self, client):
+        """Tool-call arguments streamed in fragments are emitted once, complete.
+
+        Each chunk only parses to a partial call (``args={}``, or no name/id), so
+        the tool_calls event comes from the values snapshot, not from the chunks.
+        """
+        call = {"name": "bash", "args": {"command": "ls -la"}, "id": "call-1"}
+        attribution = {"version": 1, "kind": "tool_batch", "shared_attribution": False, "actions": []}
+        assembled = AIMessage(content="", id="ai-1", tool_calls=[call], additional_kwargs={"token_usage_attribution": attribution})
+        agent = MagicMock()
+        agent.stream.return_value = iter(
+            [
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": "bash", "args": "", "id": "call-1", "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                (
+                    "messages",
+                    (
+                        AIMessageChunk(
+                            content="",
+                            id="ai-1",
+                            tool_call_chunks=[{"name": None, "args": '{"command": "ls -la"}', "id": None, "index": 0}],
+                        ),
+                        {},
+                    ),
+                ),
+                ("values", {"messages": [HumanMessage(content="hi", id="h-1"), assembled]}),
+            ]
+        )
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            events = list(client.stream("hi", thread_id="t-stream-tools"))
+
+        tool_call_events = _tool_call_events(events)
+        assert len(tool_call_events) == 1
+        assert tool_call_events[0].data["id"] == "ai-1"
+        assert [(tc["name"], tc["args"], tc["id"]) for tc in tool_call_events[0].data["tool_calls"]] == [("bash", {"command": "ls -la"}, "call-1")]
+        assert tool_call_events[0].data["additional_kwargs"] == {"token_usage_attribution": attribution}
+
     def test_stream_emits_additional_kwargs_updates_for_streamed_ai_messages(self, client):
         """stream() emits a follow-up AI event when attribution metadata arrives via values."""
         assembled = AIMessage(
@@ -1128,6 +1179,126 @@ class TestExtractText:
 
 
 class TestEnsureAgent:
+    @pytest.mark.parametrize(
+        ("agent_name", "agent_config", "expected_memory_enabled"),
+        [
+            ("stateless-agent", AgentConfig(name="stateless-agent", memory_enabled=False), False),
+            ("stateful-agent", AgentConfig(name="stateful-agent"), True),
+            (None, None, True),
+        ],
+    )
+    def test_applies_custom_agent_memory_policy(
+        self,
+        client,
+        agent_name,
+        agent_config,
+        expected_memory_enabled,
+    ):
+        client._agent_name = agent_name
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.load_agent_config", return_value=agent_config) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        if agent_name is None:
+            mock_load_agent_config.assert_not_called()
+        else:
+            mock_load_agent_config.assert_called_once_with(agent_name, user_id="owner-1")
+        assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is expected_memory_enabled
+        assert mock_apply_prompt.call_args.kwargs["memory_enabled"] is expected_memory_enabled
+
+    def test_reuses_named_agent_config_on_cached_agent_fast_path(self, client):
+        client._agent_name = "stateful-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                return_value=AgentConfig(name="stateful-agent"),
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("stateful-agent", user_id="owner-1")
+        assert mock_create_agent.call_count == 1
+
+    def test_reset_agent_refreshes_named_agent_config(self, client):
+        client._agent_name = "custom-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", side_effect=[MagicMock(), MagicMock()]),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch(
+                "deerflow.client.load_agent_config",
+                side_effect=[
+                    AgentConfig(name="custom-agent", memory_enabled=False),
+                    AgentConfig(name="custom-agent", memory_enabled=True),
+                ],
+            ) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client.reset_agent()
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        assert mock_load_agent_config.call_count == 2
+
+    @pytest.mark.parametrize(
+        "config_error",
+        [
+            FileNotFoundError("missing config"),
+            ValueError("invalid config"),
+        ],
+        ids=["missing", "invalid"],
+    )
+    def test_unreadable_named_agent_config_preserves_legacy_memory_default(
+        self,
+        client,
+        caplog,
+        config_error,
+    ):
+        client._agent_name = "soul-only-agent"
+        config = client._get_runnable_config("t1")
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.load_agent_config", side_effect=config_error) as mock_load_agent_config,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        mock_load_agent_config.assert_called_once_with("soul-only-agent", user_id="owner-1")
+        assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is True
+        assert "using the memory-enabled compatibility default" in caplog.text
+
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
         from deerflow.authz.provider import AuthzDecision, AuthzReason
 
@@ -1135,7 +1306,7 @@ class TestEnsureAgent:
             name = "test"
 
             def filter_resources(self, principal, resource_type, candidates):
-                return [name for name in candidates if name == "safe_tool"]
+                return [name for name in candidates if name in {"safe_tool", "history_read"}]
 
             def authorize(self, request):
                 # Phase 3: model:use is now checked during assembly; allow it so
@@ -1152,6 +1323,9 @@ class TestEnsureAgent:
             provider=AuthorizationProviderConfig(use="unused:Provider"),
         )
         mock_app_config.skills.deferred_discovery = True
+        from deerflow.config.task_continuity_config import TaskContinuityConfig
+
+        mock_app_config.task_continuity = TaskContinuityConfig(enabled=True)
         client._app_config = mock_app_config
 
         safe_tool = StructuredTool.from_function(lambda: "safe", name="safe_tool", description="safe")
@@ -1172,7 +1346,7 @@ class TestEnsureAgent:
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
 
-        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool"]
+        assert [tool.name for tool in mock_create_agent.call_args.kwargs["tools"]] == ["safe_tool", "history_read"]
         assert mock_build_middlewares.call_args.kwargs["authorization_provider"] is provider
 
     def test_authorization_cache_key_uses_complete_principal(self, client, mock_app_config):
@@ -1295,6 +1469,7 @@ class TestEnsureAgent:
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.load_agent_config", return_value=AgentConfig(name="custom-agent")),
             patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
             patch.object(client, "_get_tools", return_value=[]),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=MagicMock()),
@@ -1307,9 +1482,11 @@ class TestEnsureAgent:
         # Verify agent_name propagation
         mock_build_middlewares.assert_called_once()
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
+        assert mock_build_middlewares.call_args.kwargs.get("memory_enabled") is True
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
+        assert mock_apply_prompt.call_args.kwargs.get("memory_enabled") is True
         assert mock_create_agent.call_args.kwargs["state_schema"] is ThreadState
 
     def test_delta_mode_selects_state_and_normalizes_middleware(self, client):
@@ -1401,9 +1578,25 @@ class TestEnsureAgent:
 
     def test_reuses_agent_same_config(self, client):
         """_ensure_agent does not recreate if config key unchanged."""
+        from deerflow.runtime.user_context import get_effective_user_id
+
         mock_agent = MagicMock()
         client._agent = mock_agent
-        client._agent_config_key = (None, True, False, False, None, None, None, None, "full", 10, "test-user-autouse", None)
+        client._agent_config_key = (
+            None,
+            True,
+            False,
+            False,
+            None,
+            None,
+            None,
+            True,
+            None,
+            "full",
+            10,
+            get_effective_user_id(),
+            None,
+        )
 
         config = client._get_runnable_config("t1")
         client._ensure_agent(config)
@@ -1898,6 +2091,51 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+        """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"old": {"type": "stdio", "command": "npx"}},
+                    "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+                    "skills": {"kept": {"enabled": False}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
+
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == {
+            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {"kept": {"enabled": False}},
+        }
+        assert "ghp_live_secret_value" not in written_text
+
+    def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
+        config_file = tmp_path / "extensions_config.json"
+        original = json.dumps({"mcpServers": {}, "skills": {"kept": {"enabled": False}}})
+        config_file.write_text(original, encoding="utf-8")
+        reload = MagicMock()
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", reload),
+            pytest.raises(ValueError),
+        ):
+            client.update_mcp_config({"bad": {"enabled": "not-a-bool"}})
+
+        assert config_file.read_text(encoding="utf-8") == original
+        reload.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Skills management
@@ -1981,6 +2219,44 @@ class TestSkillsManagement:
             assert persisted["skills"] == {"test-skill": {"enabled": False}}
         finally:
             tmp_path.unlink()
+
+    @staticmethod
+    def _config_with_placeholders() -> dict:
+        return {
+            "mcpServers": {"github": {"type": "stdio", "command": "npx", "env": {"GITHUB_TOKEN": "$DEERFLOW_TEST_GH_TOKEN", "OPTIONAL": "$DEERFLOW_TEST_UNSET_VAR"}}},
+            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
+            "skills": {},
+        }
+
+    @pytest.mark.parametrize("category", ["public", "custom"])
+    def test_update_skill_preserves_env_placeholders(self, client, tmp_path, monkeypatch, category):
+        """Toggling a skill must not persist resolved ``$VAR`` values or blank unset ones.
+
+        ``public`` covers the shared-state path; ``custom`` with non-user-scoped
+        storage covers the fallback that also writes ``extensions_config.json``.
+        """
+        monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(json.dumps(self._config_with_placeholders()), encoding="utf-8")
+
+        skill = self._make_skill(enabled=True)
+        skill.category = category
+        storage = MagicMock()
+        storage.load_skills.side_effect = [[skill], [self._make_skill(enabled=False)]]
+
+        with (
+            patch("deerflow.client.get_or_new_user_skill_storage", return_value=storage),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config"),
+        ):
+            client.update_skill("test-skill", enabled=False)
+
+        expected = self._config_with_placeholders()
+        expected["skills"]["test-skill"] = {"enabled": False}
+        written_text = config_file.read_text(encoding="utf-8")
+        assert json.loads(written_text) == expected
+        assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
         with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[]):
