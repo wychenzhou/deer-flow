@@ -8,17 +8,20 @@ describe("core copy loading", () => {
       loadTranslations("en-US"),
       loadTranslations("zh-CN"),
     ]);
-    expect(english.inputBox.disclaimer).toBe(
-      "DeerFlow is AI and can make mistakes",
+    // The brand name is fork-specific (upstream ships "DeerFlow"), so these
+    // assert the surrounding copy with the brand as a wildcard. That still
+    // proves the right locale loaded, without breaking on a rebrand.
+    expect(english.inputBox.disclaimer).toMatch(
+      /is AI and can make mistakes$/,
     );
     expect(chinese.inputBox.disclaimer).toBe(
       "内容由AI生成，重要信息请务必核查",
     );
-    expect(english.channels.descriptions.buzz).toBe(
-      "Buzz channels and direct messages through your DeerFlow agent.",
+    expect(english.channels.descriptions.buzz).toMatch(
+      /^Buzz channels and direct messages through your .+ agent\.$/,
     );
-    expect(chinese.channels.descriptions.buzz).toBe(
-      "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
+    expect(chinese.channels.descriptions.buzz).toMatch(
+      /^通过 .+ 智能体接收 Buzz 频道消息和私聊。$/,
     );
     expect(chinese.knowledge.scope.title).toBe("知识库范围");
   });
