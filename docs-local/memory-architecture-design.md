@@ -214,9 +214,11 @@ agent_name ← 当前 Agent 名(默认 __default__)
 
 进入队列前,`_prepare_update` 做四步:
 
-1. **只留 `HumanMessage` 和 `AIMessage`**。
-   - 工具结果(`ToolMessage`)、系统消息、隐藏内部消息全部丢弃。
+1. **只留 `HumanMessage` 和"最终"`AIMessage`**。
+   - 工具结果(`ToolMessage`)、系统消息丢弃;**带 `tool_calls` 的 `AIMessage` 也丢弃**——只保留不携带工具调用的那条最终回复。
    - **为什么**:记忆抽取只需要"用户说了什么 + Agent 最终说了什么"。工具调用的中间结果进入长期记忆毫无意义,还白白烧 token。
+   - **`hide_from_ui` 不等于一定丢弃**:框架注入的隐藏消息(TodoMiddleware 提醒、ViewImage 载荷、DynamicContext 的 `__memory` 自放大防护)确实丢弃;但**用户自己作答的澄清回复**(带格式正确的 `human_input_response`)是真实内容,默认**保留**。判定顺序是先看宿主注入的 `should_keep_hidden_message` 钩子(生产环境注入的版本委托给权威的 `read_human_input_response`),没有钩子时退回一个与宿主无关的结构化检查。
+   - **`<current_uploads>` 块会被剥离**:该块是 `UploadsMiddleware` 前置拼进真实用户消息的框架内容。整条消息**只有**这个块时,该消息丢弃、并连带跳过它后面那条 AI 回复(`skip_next_ai`);还有别的正文时,**剥掉块本身、保留消息**。
 2. **去掉纯寒暄**:「好的」「知道了」「ok」这类无信息量消息跳过。
    - **为什么**:它们无法提供可抽取的信息;留着只会让"必须有来有回"的判断失真。
 3. **必须有至少一条用户消息和一条助手消息**,否则整体跳过。
@@ -285,7 +287,7 @@ agent_name ← 当前 Agent 名(默认 __default__)
 | 约束 | 机制 | 效果 |
 |---|---|---|
 | **单桶** | 只序列化 `(user, agent)` 一个桶的记忆,不跨用户/Agent | 数据量 ≈ 一个人的画像,而非全系统 |
-| **事实有上限** | `max_facts`(默认 100)按置信度截断;每条事实就是一句话 | 事实列表最多 ~100 行短文 |
+| **事实有上限** | `max_facts`(默认 100)超限时按淘汰策略裁剪(默认按置信度,可换成 `hybrid-v1`,见 §6.2);每条事实就是一句话 | 事实列表最多 ~100 行短文 |
 | **摘要被 prompt 约束句数** | §5.3.1 的编写指南限定每段 2-6 句 | 六段摘要总计不过几段话 |
 | **对话也被截断** | `format_conversation_for_update`:每条超过 1000 字符的消息只保留头 500 + 尾 500,中间 `...[truncated]...`;且只保留过滤后的 user+final-AI | 输入的对白被限制在可读规模 |
 
@@ -319,7 +321,7 @@ correction.yaml(命中 → 用户纠正)            reinforcement.yaml(命中 �
   换一种 / 改用                                对，就是这样 / 完全正确 / 就是这个意思 / 正是我想要的 / 继续保持
 ```
 
-(完整清单在 `core/message_patterns/correction.yaml` 与 `reinforcement.yaml`;可用 `patterns_dir` 覆盖,加语言/业务短语不用改代码。注意"你说的对/没错"这类中文确认**刻意不在默认 reinforcement 里**——`对` 会误伤"对不起/对方",详见文件注释。)
+(完整清单在 `core/message_patterns/` 下的 **7 个 YAML**:6 个信号各一个——`correction` / `reinforcement` / `preference` / `identity` / `goal` / `decision`——外加 `trivial.yaml`(纯寒暄,供 §4.2 第 2 步的 `filter_trivial` 用)。可用 `patterns_dir` 覆盖,加语言/业务短语不用改代码。注意"你说的对/没错"这类中文确认**刻意不在默认 reinforcement 里**——`对` 会误伤"对不起/对方",详见文件注释。)
 
 识别出的信号(现在是 **6 类**:`correction` / `reinforcement` / `preference` / `identity` / `goal` / `decision`)被 `_build_signal_hints` 转成**软提示** `correction_hint`(名字是历史遗留,现在承载全部信号提示)塞进 prompt——比如命中 correction 时提示"记录为 confidence ≥ 0.95 的 correction 类事实,且仅当它是可复用的用户级偏好;对当前任务文件/方向的纠正是 thread/project 级,不得入库"。
 
@@ -336,7 +338,7 @@ correction.yaml(命中 → 用户纠正)            reinforcement.yaml(命中 �
 
 **一句话本质**:信号 = "检测用户行为 → 转成 prompt 里的软提示 → 引导 LLM 按正确策略抽取并归类"。它不直接产生事实,只影响抽取策略(如 correction 要求 confidence≥0.95;reinforcement 要求验证而非新建)。
 
-**信号只是提示,不是裁决**:它提高模型对"纠正/认可"内容的敏感度,但最终能不能入库,由 §5.5 的**确定性写闸门**逐条判定。信号还有第二个用途——**背压豁免**:带信号的更新在队列满时也总是被允许入队(§4 队列设计),保证高价值记忆不被丢。
+**信号只是提示,不是裁决**:它提高模型对"纠正/认可"内容的敏感度,但最终能不能入库,由 §5.5 的**确定性写闸门**逐条判定。信号还有第二个用途——**背压豁免**:带信号的更新在队列满时也总是被允许入队(§4 队列设计),保证高价值记忆不被丢。队列容量由 `queue_max_depth`(默认 1000,0 = 不限)控制;触顶时被拒的是**非信号**更新,报 `QueueFull`。
 
 #### 5.2.2 staleness_review_section:过期复查
 
@@ -627,7 +629,8 @@ F3 用户关注 polars      F6 用户了解分布式计算   F9 用户用 ClickH
    expected_valid_days/scope/durability/authority, 丢弃畸形条目。
    关键安全规则: factsToRemove 存在而 newFacts 全部畸形 → 整体抛错(绝不执行"只删不写")。
 ③ 应用             _apply_updates
-   闸门 → 去重 → max_facts 裁剪 → 冲突删除 → 合并, 见 §5.5 与 §6。
+   闸门 → 去重 → max_facts 容量淘汰 → 冲突删除 → 合并,
+   见 §5.5(闸门)、§6.1(冲突删除)、§6.2(去重与淘汰)、§5.2.3(合并)。
 ```
 
 > 模板存放在 `core/prompts/memory_update.chat.yaml`(chat 格式,`system`+`user` 两条消息);可用 `backend_config.prompts_dir` 覆盖,支持按 Agent 分子目录(`{prompts_dir}/{agent_name}/memory_update.chat.yaml`)。§5.2 的两个 text 模板是 `staleness_review.yaml` / `consolidation.yaml`。
@@ -705,6 +708,54 @@ LLM 用 `factsToRemove` 表达"这条旧事实被推翻了",可带 `replacementF
 ```
 → 只有当 `newFacts[0]` 通过闸门后,`fact_z` 才被删除。
 
+### 6.2 去重与容量淘汰
+
+闸门放行之后、落盘之前,`_apply_updates` 还要过**两道与"数量"有关的关**:去重(别写重)和容量淘汰(别写爆)。
+
+#### 6.2.1 两级去重
+
+| 级别 | 触发 | 行为 | 默认 |
+|---|---|---|---|
+| **精确去重** | 归一化内容完全相同(去首尾空白 + `casefold`) | 抽取路径:`continue` 静默跳过;工具/CRUD 路径(`memory_add`):抛 `Duplicate fact` | **始终开启** |
+| **近重复合并** | 同一 `(user, agent)` 桶、**同一 category**、且 bounded token-Jaccard 相似度 ≥ 阈值 | **合并进既有事实**,而非追加 | **关闭**(`fact_dedup_enabled: false`) |
+
+近重复合并(issue #5252)的合并语义很克制——既有事实保持权威:
+
+```
+既有的 id / content / createdAt 全部不变
+confidence  = max(旧, 新)          ← 不因低置信度的复述而降低
+source      仅当置信度确实被抬高时才刷新  ← 未被确认的复述不动 source
+```
+
+两条**排除规则**(防止把有意的结构改动误判为重复):correction 的**替代品**(带 `replacementFactIndex` 的那条)不参与近重复合并;本批**被提议删除的目标**也不进入候选。相似度阈值由 `fact_dedup_similarity_threshold`(默认 0.7,范围 0.5-1.0)控制。
+
+> 为什么默认关:精确去重是"完全相同"这种无争议的判定,而近重复是**启发式**——相似度阈值调松会把"用户用 uv"和"用户用 uv 但只在 CI 里"这种**有细微差别**的事实错误地揉成一条。开启前先确认你的场景能接受这种有损判断。
+
+#### 6.2.2 容量淘汰 `max_facts`
+
+事实总数超过 `max_facts`(默认 100)时,`select_facts_for_capacity` 挑出一批淘汰。**淘汰策略可配**(`fact_eviction_policy`):
+
+| 策略 | 打分依据 | 说明 |
+|---|---|---|
+| `confidence`(**默认**) | 纯置信度 | 完整保留历史行为,升级不改变既有淘汰结果 |
+| `hybrid-v1` | 置信度 ×0.65 + 确认新鲜度 ×0.25 + 访问热度 ×0.10 | 三个有界信号加权;另为 correction 保留少量席位 |
+
+`hybrid-v1` 的两个细节:
+
+- **确认新鲜度**按半衰期衰减(`eviction_confirmation_half_life_days` 默认 90 天),**访问热度**同理(`eviction_access_half_life_days` 默认 30 天)——即"最近被显式确认过/最近被检索命中过"的事实更抗淘汰。
+- **correction 保留席位** = `min(eviction_correction_reserved_max, ceil(max_facts × eviction_correction_reserved_fraction))`,默认 `min(10, ceil(100×0.10)) = 10`;**未被 correction 用掉的席位立刻回到普通竞争**,不会空置浪费。
+
+三个权重必须**精确和为 1.0**(模型校验,否则构造期报错),所以调整它们时记得同步改另外两个。
+
+配套的两个可观测开关:
+
+| 字段 | 默认 | 作用 |
+|---|---|---|
+| `fact_eviction_shadow_enabled` | false | 用默认 `confidence` 策略裁剪时,**顺带算一遍** `hybrid-v1`,把两者的分歧记进审计——用于"先观测、再切换" |
+| `eviction_audit_max_entries` | 200 | 每个 `(user, agent)` 作用域最多保留多少条**仅元数据**的淘汰审计记录(0 = 关闭) |
+
+> 与 §5.2.2 过期复查的分工:**过期复查**回答"这条事实还成立吗"(内容判断,LLM 参与);**容量淘汰**回答"事实太多时先丢哪条"(数量判断,纯确定性代码,LLM 不参与)。一条事实可能因为"仍然成立"而通过复查,却因为"置信度最低"而被容量淘汰——两者互不豁免。
+
 ---
 
 ## 7. 写链路第 4 步:并发与持久化
@@ -743,11 +794,12 @@ LLM 用 `factsToRemove` 表达"这条旧事实被推翻了",可带 `replacementF
 
 ## 8. 读链路:召回与注入
 
-> **先给结论,避免被"召回"二字带偏。** 系统里只有**两种召回机制**,由 `memory.mode` 决定:
+> **先给结论,避免被"召回"二字带偏。** 系统里有**两套召回机制**(由 `memory.mode` 决定),外加**一个可选的排序层**(由 `retrieval_relevance_enabled` 决定,默认关):
 > - **middleware(默认):不是关键词、也不是向量**。`get_context()` 把该 `(user, agent)` 桶的**全部**记忆读出来,按置信度排序,在 token 预算内"能带多少带多少"——**根本不检索**(§8.2)。
 > - **tool(实验):才是真正的检索**。模型主动调 `memory_search(query)`,走 SQLite **FTS5 全文索引**(关键词/全文检索,§8.4)。
+> - **相关性排序(opt-in,正交于上面两者)**:`retrieval_relevance_enabled: true` 时,事实改按**与当前 query 的词法相关性**排序——**注入侧**按本轮用户消息排序后再做预算截断,**检索侧**则**完全绕过 retrieval_adapter(含 FTS5)**,直接对作用域内全部事实做确定性打分,因此**没有字面子串匹配也能召回相关事实**(§8.6)。
 >
-> 一句话:**middleware = "记得多少带多少"(置信度截断);tool = "需要时按关键词查"(FTS5)。**
+> 一句话:**middleware = "记得多少带多少"(置信度截断);tool = "需要时按关键词查"(FTS5);开了相关性则 = "按跟当前这句话的相关度排"。**
 
 ### 8.1 召回时机
 
@@ -913,7 +965,9 @@ Facts:
 | `memory_update` | 改一条 |
 | `memory_delete` | 删一条 |
 
-**`memory_search(query, top_k=5)` 的完整流程**(`retrieval.py` + `search_facts`):
+**模型看到的工具签名是 `memory_search(query, category=None, limit=10)`**(`category` 可选,按类别过滤;`limit` 默认 **10**。注意 `top_k` 是**内部**参数名——管理器 `DeerMem.search()` 的 `top_k` 默认是 5,但工具层统一用 `limit=10` 调用它)。
+
+**默认路径的完整流程**(`retrieval.py` + `storage.py::search_facts`)——即 `retrieval_relevance_enabled: false` 时:
 
 ```
 ① 分词
@@ -941,9 +995,14 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
   doc_id UNINDEXED,        # 事实 id
   content,                 # 事实正文(分词后, 供检索匹配)
   raw_content UNINDEXED,   # 原始正文
-  category / confidence / created_at / source UNINDEXED,   # 元数据
-  scope_user / scope_agent UNINDEXED,                      # 按 (user, agent) 隔离检索
-  fact_json UNINDEXED      # 事实快照(JSON)
+  category UNINDEXED,      # 元数据...
+  scope_user UNINDEXED,    # 按 (user, agent) 隔离检索
+  scope_agent UNINDEXED,
+  created_at UNINDEXED,
+  confidence UNINDEXED,
+  source UNINDEXED,
+  fact_json UNINDEXED,     # 事实快照(JSON)
+  tokenize='unicode61'     # 中文入库前另经 jieba 预处理(_preprocess_content)
 )
 ```
 
@@ -975,6 +1034,8 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 1. **"记忆会不会被关键词检索"——默认模式不会。** 它不搜,只是"按置信度把能带的都带上"。没有语义排序,也不是 RAG 式向量检索。
 2. **"FTS5 索引是干嘛的"——它服务 `memory_search` 和未来的按需召回。** middleware 模式的注入完全不依赖它(**索引坏了不影响注入,只影响搜索**)。索引存的是可重建的派生数据,坏了自动重建。
 
+> **上表描述的是默认路径(`retrieval_relevance_enabled: false`)。** 一旦打开 `retrieval_relevance_enabled`,上表的「方法」「打分」「失败兜底」三行**左右两侧同时失效**:注入和检索都改走**词法相关性排序**,且 `memory_search` **不再经过 retrieval_adapter**——FTS5 索引对它变成不相干的东西。详见 §8.6。
+
 ### 8.5 run-level memory identity(可观测性)
 
 每次带 `<memory>` 的 run,对该块的精确内容做 SHA-256,记一条 `context:memory` 事件(只存 hash,不重复存全文)。用途:
@@ -982,6 +1043,35 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 - 后续 run / 分支复用冻结的记忆块(不重复读盘),校验来源防伪造。
 
 (注入侧的落点见 §11.3.4。)
+
+### 8.6 可选的相关性排序(`retrieval_relevance_enabled`,issue #4495)
+
+**它解决什么**:纯置信度排序有个盲点——置信度表达"这条事实**有多可靠**",**不表达"它跟用户这句话有多相关"**。当一个桶里攒了 100 条高置信度事实、而预算只装得下 20 条时,默认策略对"该装哪 20 条"其实没有有效判据。开启相关性后,判据变成"跟当前 query 最相关的先装"。
+
+**它同时改变两条路径**:
+
+| 路径 | 默认(confidence) | 开启相关性后 |
+|---|---|---|
+| 注入 `get_context(query=...)` | 按 confidence 排序 → 预算截断 | **先按 idf 加权的词法相关性(与 confidence 加权组合)重排 → 再预算截断** |
+| 检索 `memory_search` | 经 `retrieval_adapter`(默认 FTS5/BM25)→ 失败退子串匹配 | **完全绕过 adapter**,对作用域内全部事实做确定性打分 |
+
+**三个关键差异**:
+
+- **无需字面匹配也能召回**:打分是 idf 加权的 token 重叠,不做子串匹配——所以含"uv"的事实**不必**在查询里出现"uv"也能被召回。
+- **确定性、离线**:不调 LLM、不用向量库,纯代码打分,可复现、可测试。
+- **索引不再是依赖**:检索路径不再经过 FTS5,所以**索引还没建好或坏掉了,相关性检索照常工作**——与默认路径「索引坏了只影响搜索」的关系正好相反。
+
+**query 从哪来**:注入侧由 `DynamicContextMiddleware` 从"本轮要注入的那条用户消息"提取(`_derive_injection_query`,带长度上界,避免多模态描述吃满 query 预算),经 `_get_memory_context(query=...)` 传入。**只有 `get_context` 签名接受 `query` 关键字的后端才收得到**——`context_query_kwargs` 会先 inspect 签名再决定是否传参,所以老插件不改签名也不会因 `TypeError` 炸掉,只是拿不到 query、退回原行为(刻意的向后兼容)。
+
+**三个字段**:
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `retrieval_relevance_enabled` | false | 总开关 |
+| `retrieval_relevance_weight` | 0.5 | 相关性 vs 置信度的权重(0.0 = 纯置信度,1.0 = 纯相关性) |
+| `retrieval_diversity_weight` | 0.0 | 贪心 MMR 相似度惩罚,压制结果中的近重复事实(0.0 = 不做多样化) |
+
+> **这仍然不是向量检索。** §1.3 的非目标依旧成立:这是**词法**(lexical)相关性——idf 加权的 token 重叠,不是 embedding/语义检索。能不能召回,取决于查询与事实**有没有共享 token**;它是"更聪明的关键词排序",不是"理解语义"。
 
 ---
 
@@ -1024,13 +1114,14 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 后端必须实现的是 pydantic `BaseModel` 子类(不是裸 ABC),所以它**免费获得字段校验和序列化**;同时 `ModelMetaclass` 派生自 `ABCMeta`,没实现的抽象方法在实例化时就抛 `TypeError`——记忆是持久状态,缺了 `add`/`get_context` 的后端是严重 bug,必须在构造期抓住,而不是运行时才炸。
 
-方法分三层:
+方法分三层,外加一组异步预留:
 
 | 层 | 方法 | 必须? | 说明 |
 |---|---|---|---|
 | **Tier-1 抽象** | `add(thread_id, messages, ...)` / `get_context(user_id, ...)` | **必须** | 写(入队抽取)+ 读(返回注入文本)。这是后端的根本职责 |
-| **Tier-2 管理** | `add_nowait` / `search` / `get_memory` / `clear_memory` / `import_memory` / `export_memory` / `shutdown_flush` | 可继承默认 | 默认抛 `NotImplementedError` 或空实现;`add_nowait` 默认委托 `add`,`shutdown_flush` 默认 `True`(无缓冲就没得排空) |
-| **Tier-3 可选** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` | 可继承默认 | 启动预热、手动 reload、事实 CRUD;只覆盖你支持的那些 |
+| **Tier-2 管理** | `add_nowait` / `search` / `get_memory` / `delete_memory` / `clear_memory` / `cancel_by_agent` / `import_memory` / `export_memory` / `shutdown_flush` | 可继承默认 | 默认抛 `NotImplementedError` 或给出安全默认;`add_nowait` 默认委托 `add`,`shutdown_flush` 默认 `True`(无缓冲就没得排空)。`delete_memory` / `export_memory` 属**零调用的死契约**(`/memory/export` 实际走 `get_memory`),默认 raise 只为保持接口可用 |
+| **Tier-3 可选钩子** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` / `on_pre_compress` / `on_turn_start` / `close` | 可继承默认 | 启动预热、手动 reload、事实 CRUD、以及两个**尚无调用方的预留钩子**(`on_pre_compress` 返回要注入压缩提示的文本;`on_turn_start` 轮次起始 nudge)——只覆盖你支持的那些 |
+| **异步(投机性)** | `aadd` / `aget_context` / `asearch` | 可继承默认 | 默认**同步委托**,没有并发收益;只为将来换 async LLM 客户端时不改契约而预留。今天的调用方走同步路径,但网络后端**应当**覆盖它们(见 §10.1.5) |
 
 构造入口是**类方法** `from_config(backend_config, *, mode, **host_hooks)`,由工厂调用而不是直接 `cls(...)`——这样每个后端自己决定怎么组装依赖、消费哪些 host hook。
 
@@ -1054,7 +1145,7 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 `manager_class` 的解析顺序:
 
 ```
-① 已注册的短名        deermem / mem0 / openviking / noop(或你新加的)
+① 已注册的短名        deermem / honcho / mem0 / noop / openviking(或你新加的)
 ② dotted 路径          "pkg.mod:Cls" 或 "pkg.mod.Cls"  → 任意包里的 MemoryManager 子类
 ③ 都解析不到           → raise ValueError(fail-loud)
 ```
@@ -1157,7 +1248,25 @@ class MyRedisManager(MemoryManager):
 
 #### 10.2.1 `MemoryStorage` 契约
 
-`memory.backend_config.storage_class` 指向一个 `MemoryStorage` 子类。抽象方法三个:
+`memory.backend_config.storage_class` 接受**三种取值**:
+
+| 取值 | 解析结果 |
+|---|---|
+| 空(**默认**) | `FileMemoryStorage`——默认 JSON 存储,不经 importlib(最可移植) |
+| `file` | 同上,显式别名 |
+| `markdown` | `MarkdownMemoryStorage`——**容错加载**版,磁盘上仍是同一份 JSON(见下) |
+| dotted 类路径 | 你自己的 `MemoryStorage` 子类 |
+
+**`MarkdownMemoryStorage`(opt-in,issue #3124)为什么存在**:推理/思考型模型偶尔吐出**畸形 JSON**,而历史上一个写了一半的摘要会抛 `MemoryStorageCorruption` 并把整个 agent 拖垮。它的加载路径是**容忍**的,而且**写入路径完全不变**(仍写 JSON):
+
+- 损坏或半写的摘要**不再让 agent 崩**;
+- Markdown 摘要只通过 ` ```memory-json ` 围栏块被接受,且无损解析;
+- 磁盘文件**既不是合法 JSON、也不是带可用围栏块的 Markdown 摘要**时,先**隔离**为 `memory.json.corrupt-<timestamp>` 再返回 `None`——因为只返回 `None` 会让下一次 `save` 从零重建 manifest(revision 重置、无 journal 备份),把不可读状态**静默抹掉**;
+- 手改 Markdown 是**读时**便利:下一次写入会把 `memory.json` 重写成 JSON,所以 Markdown 渲染是临时的(写路径尚未支持 Markdown)。
+
+启用方式是 `memory.backend_config.storage_class: markdown`。它是纯增量的加载路径改动,不影响 JSON UI,也不影响其他后端——**开它不会破坏既有部署**。
+
+抽象方法三个:
 
 | 方法 | 语义 |
 |---|---|
@@ -1210,18 +1319,24 @@ class RetrievalPort(Protocol):
 
 ### 10.4 自定义信号模式:只换"识别什么"
 
-`memory.backend_config.patterns_dir` 覆盖两个信号检测的正则文件(§5.2.1):
+`memory.backend_config.patterns_dir` 覆盖信号检测与寒暄过滤所用的正则文件(§5.2.1)。**共 7 个**——6 个信号各一个,外加纯寒暄模式:
 
 ```
 {patterns_dir}/
 ├── correction.yaml       # 识别"用户纠正"
-└── reinforcement.yaml    # 识别"用户认可"
+├── reinforcement.yaml    # 识别"用户认可"
+├── preference.yaml       # 识别"用户表达偏好/反感"
+├── identity.yaml         # 识别"用户透露身份/背景"
+├── goal.yaml             # 识别"用户表达目标/方向"
+├── decision.yaml         # 识别"用户做选择/决定"
+└── trivial.yaml          # 识别纯寒暄("好的"/"ok"/"谢谢"),供 filter_trivial 用
 ```
 
-文件里是 `regex.search` 用的模式清单。加语言/业务短语**不用改任何代码**——把新短语写进 YAML 即可。两个真实注意点(来自 §5.2.1 的注释):
+文件里是 `regex.search`(寒暄用 `fullmatch`)的模式清单。加语言/业务短语**不用改任何代码**——把新短语写进 YAML 即可。三个真实注意点(来自 §5.2.1 的注释):
 
 - 中文 `对` 这类确认**刻意不在默认 reinforcement 里**——`对` 会误伤"对不起/对方"。你自己加模式时留意单字正则的误伤。
-- `patterns_dir` 一旦显式设置,**两个文件都必须存在**(否则启动即 fail-loud,不静默回退到内置模式)。
+- **逐名按需加载,不是启动期全量校验**:`detect_signals` 只遍历 `SIGNAL_NAMES` 里实际存在的信号名去 `load_patterns`,所以缺哪个文件是**首次加载到该文件那一刻**报 `FileNotFoundError`(显式 `patterns_dir` 下),而不是"启动即失败"。
+- 寒暄模式(`trivial.yaml`)也走同一个 `load_patterns`,所以显式设置 `patterns_dir` 时它同样必须有——**别只拷那 6 个信号文件**。
 
 ---
 
@@ -1761,6 +1876,109 @@ backend/.deer-flow/users/{user_id}/.retrieval/
 **对话 3**(90 天后):`fact_ctx` 进入 staleness 复查 → LLM 判 EXTEND → `expected_valid_days` 调大,`revision` +1。
 
 **观察**:摘要文件"长不大"但内容随对话演进;事实文件"只增删改单条",彼此隔离,坏一条不影响其他。
+
+## A.9 DeerMem 完整配置字段表
+
+前面各节的字段散落在 §5.2.2 / §5.2.3 / §6.2 / §8.2 / §8.6 各处,这里汇总成一张**按用途分组**的总表,便于"配一个值之前先确认它叫什么、默认多少"。
+
+> **配置分两层**:`memory.*` 是**宿主共享**字段(每个后端/调用点都读);`memory.backend_config.*` 是**后端私有**字段(工厂原样传给后端,由后端自己解释)。把私有 knob 放进 `backend_config`,正是"换后端"能保持可移植的原因(§10.1.3)。
+>
+> **旧配置自动迁移**:pre-abstraction 时期写在 `memory.<field>` 顶层的 DeerMem 私有字段(如 `memory.storage_path`、`memory.consolidation_enabled`),加载时会**自动搬进** `backend_config`,所以老 `config.yaml` 升级后**不会静默回退成默认值**。
+
+### A.9.1 宿主共享字段(`memory.*`)
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `enabled` | true | 记忆机制总开关(调用点闸门) |
+| `mode` | `middleware` | `middleware`(被动抽取)/ `tool`(模型主动调工具),互斥 |
+| `injection_enabled` | true | 是否把记忆注入上下文;关掉则"只记不用" |
+| `shutdown_flush_timeout_seconds` | 30.0(1-300) | 优雅停机时排空待处理更新的硬预算;每个待处理项一次 LLM 调用 |
+| `manager_class` | `deermem` | 后端选择器:注册短名或 dotted 路径(§10.1.2) |
+| `backend_config` | `{}` | 传给后端 `__init__` 的私有配置 dict |
+
+### A.9.2 DeerMem 私有字段(`memory.backend_config.*`)
+
+#### 存储
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `storage_path` | `""` | DeerMem 根目录;空 = `$DEERMEM_DATA_DIR` 或 `~/.deermem/`。**按目录解释**,指向一个已存在的文件会构造期 fail-loud |
+| `storage_class` | `""` | `""`/`file` = `FileMemoryStorage`;`markdown` = 容错加载版;或 dotted 类路径(§10.2.1) |
+| `strict_user_scope` | false | 要求每次存储访问都带 `user_id` |
+| `manifest_filename` | `memory.json` | 用户级摘要 JSON 文件名(为配置兼容保留,必须是纯 `.json` 名) |
+| `file_lock_timeout_seconds` | 10(1-120) | 每作用域跨进程**建议性锁**(advisory lock)的最长等待 |
+| `retrieval_adapter` | `fts5` | 检索适配器:`fts5` / 空串关闭 / dotted 工厂(§10.2.2) |
+
+#### 去重与容量(详解见 §6.2)
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `fact_dedup_enabled` | false | 写入侧近重复合并开关 |
+| `fact_dedup_similarity_threshold` | 0.7(0.5-1.0) | 近重复合并的相似度阈值 |
+| `max_facts` | 100(10-500) | 事实数上限 |
+| `fact_eviction_policy` | `confidence` | `confidence`(历史行为)/ `hybrid-v1` |
+| `fact_eviction_shadow_enabled` | false | 按 `confidence` 裁剪时顺带算一遍 `hybrid-v1`,把分歧记进审计(先观测再切换) |
+| `eviction_confidence_weight` | 0.65 | `hybrid-v1` 置信度权重 |
+| `eviction_confirmation_weight` | 0.25 | `hybrid-v1` 确认新鲜度权重 |
+| `eviction_access_weight` | 0.10 | `hybrid-v1` 访问热度权重 |
+| `eviction_confirmation_half_life_days` | 90 | 确认新鲜度半衰期(天) |
+| `eviction_access_half_life_days` | 30 | 访问热度半衰期(天) |
+| `eviction_correction_reserved_fraction` | 0.10 | correction 保留席比例 |
+| `eviction_correction_reserved_max` | 10 | correction 保留席上限 |
+| `eviction_audit_max_entries` | 200(0 = 关闭) | 每作用域保留的**仅元数据**淘汰审计条数 |
+| `fact_confidence_threshold` | 0.7(0-1) | 入库置信度下限 |
+
+> 三个 `eviction_*_weight` **必须精确和为 1.0**,否则构造期报错——改一个记得改另外两个。
+
+#### 队列与水位
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `debounce_seconds` | 30(1-300) | 入队后等待多久才处理(去抖) |
+| `queue_max_depth` | 1000(0 = 不限) | 待处理项背压上限;触顶时**非信号**更新报 `QueueFull`,信号更新永远放行 |
+| `watermark_max_keys` | 4096(0 = 不限) | 内存水位缓存的 LRU 上限(每 thread/user/agent 一项);被淘汰的 key 下次轮次重新抽一批 |
+
+#### 注入预算(详解见 §8.2.2)
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `max_injection_tokens` | 2000(100-8000) | 主预算 |
+| `token_counting` | `tiktoken` | `tiktoken` 精确(可能下载 BPE)/ `char` 离线 CJK 估算 |
+| `guaranteed_categories` | `["correction"]` | 进特权预留的类别 |
+| `guaranteed_token_budget` | 500(50-2000) | 特权预留额度 |
+
+#### 过期复查(默认值与逐条解释见 §5.2.2)
+
+`staleness_review_enabled`(true)、`staleness_age_days`(90)、`staleness_min_candidates`(3)、`staleness_max_removals_per_cycle`(10)、`staleness_protected_categories`(`["correction"]`)、`staleness_max_lifetime_multiplier`(20.0)、`staleness_max_extension_days`(3650)。
+
+#### 碎片合并(默认值与逐条解释见 §5.2.3)
+
+`consolidation_enabled`(**false**——合并有损,故默认关)、`consolidation_min_facts`(8)、`consolidation_max_groups_per_cycle`(3)、`consolidation_max_sources`(8)。
+
+#### 相关性检索(详解见 §8.6)
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `retrieval_relevance_enabled` | false | 相关性排序总开关(同时改注入与检索) |
+| `retrieval_relevance_weight` | 0.5(0-1) | 相关性 vs 置信度权重 |
+| `retrieval_diversity_weight` | 0.0(0-1) | MMR 近重复惩罚 |
+
+#### 外部化模板 / 模式
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `prompts_dir` | `null` | 覆盖 4 份 prompt 模板(§10.3);支持按 Agent 分子目录 |
+| `patterns_dir` | `null` | 覆盖 **7** 个模式文件(§10.4);显式设置后缺文件即报错 |
+
+#### 程序注入(不能来自 YAML)
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `model` | 嵌套子配置 | 抽取 LLM 的 `provider` / `model` / `api_key` / `base_url` / `temperature` |
+| `host_llm` | `null` | 宿主注入的现成 chat model(零配置 UX);优先级高于 `model` |
+| `extraction_callback` | `null` | 抽取后的观测回调(§10.5) |
+| `should_keep_hidden_message` | `null` | 决定 `hide_from_ui` 消息是否保留(§4.2) |
+| `trace_context_manager` | `null` | 把 `trace_id` 绑进抽取线程的 ContextVar,让日志/追踪可关联 |
 
 ---
 
