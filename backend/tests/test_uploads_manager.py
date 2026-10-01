@@ -11,6 +11,7 @@ import pytest
 from deerflow.uploads.manager import (
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
     copy_upload_file_no_symlink,
@@ -20,6 +21,31 @@ from deerflow.uploads.manager import (
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
+
+
+@pytest.mark.skipif(not (hasattr(os, "O_NOFOLLOW") and hasattr(os, "fchmod")), reason="POSIX-only: O_NOFOLLOW + fchmod")
+def test_apply_upload_sandbox_permits_propagates_permission_errors(tmp_path):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+
+    with patch.object(os, "fchmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
+    assert stat.S_IMODE(upload.stat().st_mode) == 0o600
+
+
+def test_apply_upload_sandbox_permits_fallback_propagates_permission_errors(tmp_path, monkeypatch):
+    upload = tmp_path / "attachment.bin"
+    upload.write_bytes(b"attachment")
+    upload.chmod(0o600)
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+    with patch.object(os, "chmod", side_effect=PermissionError("permission denied")):
+        with pytest.raises(PermissionError, match="permission denied"):
+            apply_upload_sandbox_permits(upload, stat.S_IRGRP | stat.S_IROTH)
+
 
 # ---------------------------------------------------------------------------
 # normalize_filename
@@ -47,6 +73,39 @@ class TestNormalizeFilename:
     def test_dot_only(self):
         with pytest.raises(ValueError, match="unsafe"):
             normalize_filename(".")
+
+    def test_rejects_embedded_nul(self):
+        with pytest.raises(ValueError, match="NUL"):
+            normalize_filename("report\x00.pdf")
+
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+    def test_rejects_reserved_staging_names(self, filename):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+    def test_keeps_non_staging_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            write_upload_file_no_symlink(tmp_path, ".upload-notes.part", b"user document")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "file.txt.", "file.txt ", "a.", "folder/CON"],
+    )
+    def test_rejects_windows_incompatible_names(self, filename):
+        with pytest.raises(ValueError, match="not portable to Windows"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", ".gitignore"])
+    def test_allows_portable_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_parent_is_stripped_with_the_directory(self):
+        assert normalize_filename("CON/notes.md") == "notes.md"
 
 
 # ---------------------------------------------------------------------------

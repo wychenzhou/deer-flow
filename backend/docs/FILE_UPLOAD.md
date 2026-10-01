@@ -24,6 +24,10 @@ POST /api/threads/{thread_id}/uploads
 
 网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
+文件名匹配 `.upload-*.part`（例如 `.upload-notes.part`）时，网关会返回 `400 Bad Request`，提示改名后重新上传。这是系统保留的临时文件命名规则；文件名按去掉目录后的 basename 判断，HTTP 检查在 Linux 上也同时识别 `/` 和 `\` 两种路径分隔符，例如 `folder\.upload-notes.part`。网关会先检查整批文件，再开始写入聊天的上传目录或获取沙箱，因此保留名称排在批次末尾也不会留下部分上传。聊天界面收到该错误后会提示用户，并停止本次消息发送。`.upload-notes.txt`、`notes.part` 和 `.env` 仍可上传。
+
+嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和重命名也遵循这项限制；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
+
 **响应：**
 ```json
 {
@@ -140,6 +144,23 @@ To work with these files:
 `list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
 `extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+
+历史上传支持有界续页：`max_results` 默认 20、每页最多 100。
+返回 `next_cursor` 时，将其作为下一次调用的 `cursor`，并保留相同的
+`query` / `extensions`；末页没有 `next_cursor`。可在续页时调整每页数量和
+`include_outline`，大纲只针对当前页提取。结果按修改时间倒序、同时间按原始文件名
+排序；`total_count` 是完整过滤结果数，`omitted_summary` 只统计当前页之后剩余的文件。
+
+例如 250 个匹配附件可按 100 → 100 → 50 枚举。每页都排除本轮上传、staging、
+符号链接以及现有规则识别的转换 companion。规范化后的过滤条件、用户、线程、
+本轮上传排除集合或目录中的普通文件清单元数据改变时，旧游标返回
+`error: stale_cursor`；畸形或过长游标返回 `error: invalid_cursor`。
+两种情况都有 `restart_required: true`，应丢弃此前收集的页，省略 `cursor`
+重新开始，避免把两次不同枚举混合起来。
+
+游标仅用于一致性校验，不是授权凭据；工具仍从可信 runtime 解析当前用户和线程。
+每页重新扫描目录，校验文件名、大小及纳秒级修改/变更时间，不保存持久快照，
+不保证文件字节不变或扫描期间的原子快照，也不限制任意大目录的扫描开销。
 
 ### 使用上传的文件
 

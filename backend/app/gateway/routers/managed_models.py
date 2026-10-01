@@ -1,6 +1,7 @@
 """Admin-only shared model management. Credentials never leave the server."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
@@ -9,7 +10,10 @@ from pydantic import BaseModel, ConfigDict
 from app.gateway.deps import require_admin_user
 from deerflow.config.app_config import get_app_config
 from deerflow.config.managed_models import ManagedModel, ManagedModelStore
+from deerflow.reflection import resolve_class
+from deerflow.utils.file_io import await_drained
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/managed-models", tags=["models"])
 _ADMIN = "Admin privileges are required to manage shared models."
 
@@ -53,10 +57,24 @@ def _save(body: SaveModelRequest):
         raise HTTPException(503, "Managed model storage is unavailable") from None
 
 
+def _save_with_failure_logging(body: SaveModelRequest):
+    """Record save failures before a cancelled caller consumes the worker result."""
+    try:
+        return _save(body)
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            logger.error("Managed model save failed (HTTP %d)", exc.status_code)
+        raise
+    except Exception as exc:
+        # Storage exceptions can contain credentials; retain only the type.
+        logger.error("Managed model save failed (%s)", type(exc).__name__)
+        raise
+
+
 @router.put("")
 async def save_model(request: Request, body: SaveModelRequest):
     await require_admin_user(request, detail=_ADMIN)
-    return await asyncio.to_thread(_save, body)
+    return await await_drained(asyncio.to_thread(_save_with_failure_logging, body))
 
 
 def _probe_config(body: SaveModelRequest):
@@ -70,16 +88,24 @@ def _probe_config(body: SaveModelRequest):
     return profile.runtime_config()
 
 
+def _build_probe(body: SaveModelRequest):
+    """Resolve credentials and construct provider clients off the event loop."""
+    config = _probe_config(body)
+    settings = config.model_dump(include={"model", "api_key", "base_url", "api_base"}, exclude_none=True)
+    # Forced tool selection requires thinking off on DeepSeek. Reuse the resolved
+    # profile's disable settings without changing the saved chat configuration.
+    settings.update(config.when_thinking_disabled or {})
+    settings.update(timeout=15, max_retries=0, max_tokens=32)
+    model = resolve_class(config.use)(**settings)
+    return model.bind_tools([{"type": "function", "function": {"name": "connection_check", "description": "Check the connection", "parameters": {"type": "object", "properties": {}}}}], tool_choice="connection_check")
+
+
 @router.post("/test")
 async def test_model(request: Request, body: SaveModelRequest):
     """Send a bounded streaming tool-call probe without saving the profile."""
     await require_admin_user(request, detail=_ADMIN)
     try:
-        config = await asyncio.to_thread(_probe_config, body)
-        from langchain_openai import ChatOpenAI
-
-        model = ChatOpenAI(model=config.model, base_url=config.base_url, api_key=config.api_key, timeout=15, max_retries=0, max_tokens=32)
-        probe = model.bind_tools([{"type": "function", "function": {"name": "connection_check", "description": "Check the connection", "parameters": {"type": "object", "properties": {}}}}], tool_choice="connection_check")
+        probe = await asyncio.to_thread(_build_probe, body)
         response = None
         async with asyncio.timeout(20):
             async for chunk in probe.astream([HumanMessage(content="Call connection_check.")], config={"callbacks": []}):
