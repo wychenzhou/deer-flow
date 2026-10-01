@@ -1,6 +1,6 @@
 # 第 2 章　仓库全景与技术栈
 
-> 基于 DeerFlow 最新源码（本仓库 commit `2672e209`，2026-09）编写。
+> 基于 DeerFlow 最新源码（本仓库 commit `11b339d6`，2026-10-01）编写。
 
 > **旧版说明**：本文融合两本旧书对应章节（hawkli 版"核心概念/项目结构"、coolclaws 版"仓库全景与技术栈"），但一切以重构后的**最新 monorepo 结构**为准。旧书基于数月前的 DeerFlow（`backend/src/` 单包布局、独立 LangGraph Server、`skill.yaml` 等），其中大量路径与概念在 2.x 已作废。凡冲突处，以本章为准；文末 2.13 给出了新旧目录对照表，供旧书读者迁移。
 
@@ -25,18 +25,18 @@
 
 DeerFlow 是 **bytedance/deer-flow** 开源的 **LangGraph-based AI super-agent system**（MIT License，Python ≥3.12 + Node.js ≥22）。README 标题自述为 *"**D**eep **E**xploration and **E**fficient **R**esearch **Flow**"*——一个编排 sub-agents、memory、sandbox 的"超级 Agent 框架"，能力靠可扩展的 skills 注入。
 
-2.0 是**推倒重写的版本**：与 v1（纯 Deep Research 框架）不共享代码，v1 维护在 `main-1.x` 分支；本仓库是 2.x 主线。当前 release 版本为 **2.1.0**（2026-09 检出）。
+2.0 是**推倒重写的版本**：与 v1（纯 Deep Research 框架）不共享代码，v1 维护在 `main-1.x` 分支；本仓库是 2.x 主线。当前 release 版本为 **2.2.0-dev**（2026-10-01 检出）。
 
 **版本 lockstep 是仓库的硬约束**：一个发布版本必须在四个"版本源"中完全一致——
 
 | 版本源 | 当前值（本检出） |
 |---|---|
-| `backend/pyproject.toml` → `[project] version`（应用包 `deer-flow`） | `2.1.0` |
+| `backend/pyproject.toml` → `[project] version`（应用包 `deer-flow`） | `2.2.0-dev` |
 | `backend/packages/harness/pyproject.toml` → `[project] version`（`deerflow-harness`） | `2.1.0` |
-| `frontend/package.json` → `version` | `2.1.0` |
-| `deploy/helm/deer-flow/Chart.yaml` → `version` + `appVersion` | `2.1.0` |
+| `frontend/package.json` → `version` | `2.2.0-dev` |
+| `deploy/helm/deer-flow/Chart.yaml` → `version` + `appVersion` | `2.2.0-dev` |
 
-例外是 `deerflow-extension-api`：它是**独立的契约版本号**（当前 `0.2.0`），不与 release 版本对齐。harness 对它做**精确锁定**：
+例外是 `deerflow-extension-api`：它是**独立的契约版本号**（当前 `0.2.4`），不与 release 版本对齐。harness 对它做**精确锁定**：
 
 ```toml
 # backend/packages/harness/pyproject.toml
@@ -44,7 +44,7 @@ DeerFlow 是 **bytedance/deer-flow** 开源的 **LangGraph-based AI super-agent 
 # the contract version it implements, extensions declare ranges. A range
 # here would let pip resolve a newer contract package than this harness
 # implements, making newer extensions look supported at runtime.
-"deerflow-extension-api==0.2.0",
+"deerflow-extension-api==0.2.4",
 ```
 
 配套两个脚本维护 lockstep：
@@ -176,7 +176,7 @@ backend/
 
 ## 2.4　deerflow-harness 内部模块地图
 
-harness 包（`backend/packages/harness/deerflow/`）是 Agent 框架本体，模块如下（与 backend/AGENTS.md 的目录地图一致）：
+harness 包（`backend/packages/harness/deerflow/`）是 Agent 框架本体，模块如下（基于 backend/AGENTS.md 目录地图与实际包结构整理）：
 
 ```
 deerflow/
@@ -185,8 +185,11 @@ deerflow/
 │   ├── middlewares/  #   中间件链（40+ 个文件：memory、summarization、sandbox、
 │   │                 #   todo、token_budget、tool_error_handling、uploads、view_image、
 │   │                 #   loop_detection、read_before_write、safety_finish_reason、
-│   │                 #   subagent_limit、clarification、mcp_routing、input_sanitization…）
-│   ├── memory/       #   记忆抽取、队列、prompt（DeerMem 长期记忆）
+│   │                 #   subagent_limit、clarification、mcp_routing、input_sanitization、
+│   │                 #   knowledge_scope、pii_redaction、artifact_*…）
+│   ├── memory/       #   记忆抽取、队列、prompt；backends/（DeerMem/mem0/honcho/openviking/noop）
+│   ├── task_continuity/  # 任务连续性（task_notes 通道、归档、工具）
+│   ├── interaction_policy.py / human_input.py / goal_state.py  # 交互策略 / 人工输入 / 目标状态
 │   ├── factory.py    #   create_deerflow_agent() SDK 级入口
 │   ├── features.py   #   RuntimeFeatures 声明
 │   └── thread_state.py  # ThreadState schema
@@ -197,6 +200,11 @@ deerflow/
 ├── tools/            # 工具：builtins/（present_file、ask_clarification、view_image、
 │                     # review_skill_package、task/background_tasks/batch_task、tool_search…）+ 搜索注册
 ├── mcp/              # MCP 集成（client、tools、cache、McpTaskService 长任务运行时）
+├── capabilities/     # 声明式能力发现（catalog/business/runtime；执行归各自运行时）
+├── projects/         # 项目运行时（run 起始锚定上下文、文档、trash、工具）
+├── storage/          # 内容寻址 blob 存储（contract/manager/backends）
+├── typesafe/         # 共享 TypeSafe（Jev）客户端
+├── knowledge_scope.py / mcp_scope.py  # 知识检索作用域 / MCP 会话作用域契约
 ├── skills/           # Skill 发现、加载、解析（SKILL.md）、安装、校验、安全扫描
 ├── extensions/       # Python 插件：loader、registry、placement、isolation、CLI、gateway 桥
 ├── models/           # 模型工厂与供应商适配（thinking/vision 支持）
@@ -232,7 +240,7 @@ FastAPI 应用入口 `gateway/app.py`，路由按域拆到 `routers/`：
 
 ```text
 app/gateway/routers/
-├── models.py            # GET/POST /api/models        模型列表与配置
+├── models.py  managed_models.py   # /api/models        模型列表与受管模型配置
 ├── threads.py           # /api/threads/{thread_id}    Thread 数据清理等
 ├── thread_runs.py       # /api/threads/{id}/runs      Thread 级 Run 生命周期
 ├── runs.py              # /api/runs                   无状态 Run 执行
@@ -240,12 +248,16 @@ app/gateway/routers/
 ├── artifacts.py         # /api/threads/{id}/artifacts 产物服务
 ├── suggestions.py       # /api/threads/{id}/suggestions  后续建议
 ├── memory.py            # /api/memory                 全局记忆
-├── mcp.py  mcp_tasks.py # /api/mcp、MCP 长任务          MCP server 管理
+├── mcp.py  mcp_tasks.py  personal_mcp.py   # MCP server 管理、MCP 长任务、个人 MCP
 ├── skills.py            # /api/skills                 Skill 注册/状态/上传安装
 ├── agents.py            # /api/agents                 自定义 Agent 配置
 ├── subagents.py  subagent_batches.py                  # 子代理目录/批处理
 ├── scheduled_tasks.py   # /api/scheduled-tasks        定时任务
 ├── channels.py  channel_connections.py                # IM 渠道管理
+├── capabilities.py  knowledge.py                      # 能力目录 / 知识库
+├── plugins.py  projects.py                            # 插件管理 / 项目
+├── project_documents.py  project_thread_files.py      # 项目文档 / 项目线程文件
+├── trash.py  user_preferences.py                      # 回收站 / 用户偏好
 ├── auth.py  features.py  feedback.py  browser.py
 ├── github_webhooks.py  integrations.py  console.py  input_polish.py
 └── assistants_compat.py # LangGraph 兼容辅助路由
@@ -280,9 +292,11 @@ app/channels/
 ├── base.py            # ChannelBase 抽象
 ├── service.py         # start_channel_service：channel 生命周期总管
 ├── manager.py  run_policy.py  message_bus.py  store.py
+├── commands.py  connection_identity.py  dedupe_store.py  runtime_config_store.py
+├── sandbox_files.py   # 沙箱文件桥
 ├── feishu.py  slack.py  telegram.py  discord.py
-├── dingtalk.py  wechat.py  wecom.py  github.py
-├── buzz.py  buzz_nostr.py    # Buzz（Nostr 协议层）
+├── dingtalk.py  wechat.py  wecom.py  wechat_qr_login.py  github.py
+├── buzz.py  buzz_nostr.py  buzz_seen_events.py   # Buzz（Nostr 协议层）
 └── feishu_run_policy.py  buzz_run_policy.py …
 ```
 
@@ -315,15 +329,18 @@ deerflow_extension_api/
 └── state.py                    # 状态访问（ExtensionData.scope_id 等）
 ```
 
-加载链路在 harness 的 `deerflow/extensions/`（loader/registry/placement/isolation/manager/CLI）。**第三方扩展的来源是 `config.yaml` 顶层的 `plugins:` 列表**——刻意由运维控制（该列表会导致 import 代码，所以不放进 API 可写的 `extensions_config.json`）。打包扩展可贡献五类东西：
+加载链路在 harness 的 `deerflow/extensions/`（loader/registry/placement/isolation/manager/CLI）。**第三方扩展的来源是 `config.yaml` 顶层的 `plugins:` 列表**——刻意由运维控制（该列表会导致 import 代码，所以不放进 API 可写的 `extensions_config.json`）。注册表契约暴露**八类**贡献点：
 
-1. **middleware**（进中间件链）
-2. **task lifecycle**（任务生命周期钩子）
-3. **system-model observers**
-4. **Gateway services**
-5. **FastAPI HTTP routers**
+1. **middleware contributors**（进中间件链，声明 lead/subagent 作用域与语义放置）
+2. **task-lifecycle contributors**（任务生命周期钩子）
+3. **system-model-call observers**
+4. **agent-assembly observers**
+5. **context-compaction observers**
+6. **Gateway-lifetime services**
+7. **eager routers**（安装期急切构造的 FastAPI HTTP 路由）
+8. **实验性全栈 plugins**（`registry.plugin()`，见 `docs/full-stack-plugins.md`）
 
-参考实现见 `examples/deerflow-extension-example/`（独立可发布包，五个贡献点齐全，含测试）。管理命令：
+参考实现见 `examples/deerflow-extension-example/`（独立可发布包，演示 middleware/task-lifecycle/system-model-observer/service/router 等贡献点，含测试）。管理命令：
 
 ```bash
 deerflow extensions install SOURCE=...   # 或根 Makefile 包装：make extension-install SOURCE=...
@@ -404,24 +421,31 @@ docker/ 目录：`docker-compose.yaml`（生产）、`docker-compose-dev.yaml`�
 
 | 文件 | 内容 | 来源模板 |
 |---|---|---|
-| `config.yaml` | 应用主配置（约 2836 行的 example 模板，`config_version: 39`） | `config.example.yaml` |
+| `config.yaml` | 应用主配置（3389 行的 example 模板，`config_version: 50`） | `config.example.yaml` |
 | `extensions_config.json` | MCP servers + skills 启用状态 + MCP 拦截器 | `extensions_config.example.json` |
 
 ```yaml
-# config.example.yaml（节选顶层块；当前 schema 版本 config_version: 39）
+# config.example.yaml（节选顶层块；当前 schema 版本 config_version: 50）
 log_level: info
-max_recursion_limit: 1000
+recursion_limit: 100          # 每次 run 默认递归步数（客户端可覆盖，非法值回落此默认）
+max_recursion_limit: 1000     # 服务端硬上限（防止失控的 API 成本 / DoS）
 models:            # 模型定义列表（use 指向 "package.module:class"）
+knowledge_base:    # 知识库检索作用域
 tools:             # 工具开关与分组（tool_groups、tool_search、tool_output…）
+tool_artifacts:    # 工具产物句柄注册表（model 只见 handle）
 sandbox:           # 沙箱模式（local/provisioner…）与挂载
 skills:            # skills 路径、扫描、校验（skill_scan 另有块）
 memory:            # DeerMem 记忆系统
 summarization:     # 上下文摘要策略
+pii_redaction:     # PII 脱敏
+projects:          # 项目运行时（run 起始锚定上下文）
+task_continuity:   # 任务连续性（task_notes/task_history）
 uploads:  title:  suggestions:  input_polish:
 loop_detection:  read_before_write:  safety_finish_reason:
 token_usage:  token_budget:  verification:
 subagent_runtime:  subagent_batches:  agents_api:
 database:  run_events:  agent_storage:  run_ownership:  scheduler:  mcp_tasks:
+blob_storage:      # 内容寻址 blob 存储
 authorization:     # 授权规则（含 plugins 之外的鉴权配置）
 ```
 
@@ -456,7 +480,7 @@ skills/
 └── custom/      # 用户私有 skills（.gitignore 排除，不提交）
 ```
 
-`public/` 现有（节选）：`bootstrap`（引导）、`deep-research`、`data-analysis`、`ppt-generation`、`chart-visualization`、`image-generation`、`video-generation`、`music-generation`、`web-design-guidelines`、`frontend-design`、`consulting-analysis`、`academic-paper-review`、`systematic-literature-review`、`newsletter-generation`、`podcast-generation`、`claude-to-deerflow`、`github-deep-research`、`surprise-me`、`find-skills`、**`skill-creator`**（写 skill 的 skill）、**`skill-reviewer`**（内置只读质量评审器）等。仓库根 `skills-lock.json` 记录从 GitHub 引入的外部 skill 及其 SHA-256：
+`public/` 现有（节选）：`bootstrap`（引导）、`deep-research`、`data-analysis`、`ppt-generation`、`chart-visualization`、`image-generation`、`video-generation`、`music-generation`、`web-design-guidelines`、`frontend-design`、`consulting-analysis`、`academic-paper-review`、`systematic-literature-review`、`newsletter-generation`、`podcast-generation`、`claude-to-deerflow`、`github-deep-research`、`code-documentation`、`dws`、`kami`、`vercel-deploy`、`surprise-me`、`find-skills`、**`skill-creator`**（写 skill 的 skill）、**`skill-reviewer`**（内置只读质量评审器）等。仓库根 `skills-lock.json` 记录从 GitHub 引入的外部 skill 及其 SHA-256：
 
 ```jsonc
 // skills-lock.json
@@ -563,7 +587,7 @@ cd backend && make lint && make format  # ruff lint / ruff format（CI 强制 fo
 
 - **仓库分层**：根 `AGENTS.md` 管地图与公约；backend 三包（app 壳 / harness 框架 / extension-api 契约），**依赖只许 app → harness，由 `test_harness_boundary.py` 强制**——这是理解全书的钥匙。
 - **一个运行时**：`make dev`、Docker、生产共用 Gateway 内嵌的 `RunManager + run_agent() + StreamBridge`；对外只开 nginx 一个口（2026），`/api/langgraph/*` 是 LangGraph SDK 兼容面。
-- **配置在根**：`config.yaml`（主配置，`config_version: 39`）+ `extensions_config.json`（MCP/skills，运行时 API 可写）；版本号 lockstep 2.1.0 由 `verify_versions.sh` 把关。
-- **扩展走契约**：第三方用 `deerflow_extension_api.*` 声明贡献（middleware/任务生命周期/observers/Gateway 服务/HTTP 路由），来源在 `config.yaml plugins:`，装完重启 Gateway。
+- **配置在根**：`config.yaml`（主配置，`config_version: 50`）+ `extensions_config.json`（MCP/skills，运行时 API 可写）；版本号 lockstep 2.2.0-dev 由 `verify_versions.sh` 把关。
+- **扩展走契约**：第三方用 `deerflow_extension_api.*` 声明贡献（middleware/任务生命周期/observers/Gateway 服务/HTTP 路由/全栈插件等八类），来源在 `config.yaml plugins:`，装完重启 Gateway。
 
 **下一步**：进入 backend 的骨架——阅读第 3 章，看 Gateway 如何把 HTTP/IM 请求送进 harness 运行时，以及 LangGraph 兼容层如何落地。

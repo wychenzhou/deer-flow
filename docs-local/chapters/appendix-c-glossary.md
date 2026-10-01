@@ -1,13 +1,13 @@
 # 附录 C　术语表
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10,版本 2.2.0-dev)编写
 
 本表收录全书核心术语,按主题分为 13 组、共 90+ 条。每条给出**一句话定义**与**出现章节/源码位置**,方便按需回查。
 
 **阅读约定**
 - "第 N 章"指向 `docs-local/chapters/0N-*.md` 对应章;小节号为该章自身标题编号。
 - "middleware-0X"指向 `docs-local/middleware/` 下的中间件深度解析文档;middleware-07 等按其标题首行所述链位区间(23–26)理解。
-- "链位"是第 6 章定义的 35 链位地图中的装配位号,注意**链位号 ≠ 物理注册序**(见 §C.3)。
+- "链位"是第 6 章定义的 39 链位地图中的装配位号,注意**链位号 ≠ 物理注册序**(见 §C.3)。
 - 源码路径均相对仓库根,形如 `backend/packages/harness/deerflow/...`(import 名 `deerflow.*`)。
 
 ## C.1　架构与分层
@@ -85,13 +85,13 @@
 
 ## C.3　中间件体系与钩子
 
-- **AgentMiddleware / 中间件** —— 扩展与横切逻辑的基本单元:继承中间件基类、实现若干钩子,由装配器按 35 链位地图排进管道;中间件是 DeerFlow 最大的定制面。
+- **AgentMiddleware / 中间件** —— 扩展与横切逻辑的基本单元:继承中间件基类、实现若干钩子,由装配器按 39 链位地图排进管道;中间件是 DeerFlow 最大的定制面。
   出处:第 6 章 §1、§7 | `backend/packages/harness/deerflow/agents/middlewares/`
 
 - **状态钩子 vs 包裹钩子** —— 钩子两大家族:状态钩子(read/write 型,读写图状态如 before_agent、after_model)与包裹钩子(wrap_* 型,包住模型调用/工具调用、返回迭代器流);先分清拦的是什么再谈顺序。
   出处:第 6 章 §1.1
 
-- **35 链位地图** —— 全书唯一需要对照的装配总表:35 个链位覆盖共享基座、lead-only 段与扩展并入段;链位号是"职责槽位",与物理注册序存在系统性偏差。
+- **39 链位地图** —— 全书唯一需要对照的装配总表:39 个链位覆盖共享基座、lead-only 段与扩展并入段;链位号是"职责槽位",与物理注册序存在系统性偏差。
   出处:第 6 章 §2.3、§3、§4
 
 - **wrap_model_call** —— 包裹模型调用的钩子:在模型被真正调用时包一层生成器,可注入/改写/截断/统计模型输出流;技能激活、token 预算等中间件都依赖它。
@@ -121,7 +121,7 @@
 - **ReadBeforeWriteMiddleware** —— 文件写安全防线:写文件前要求先读(或显式覆盖确认),防止"没看过就覆盖"的破坏性写。
   出处:middleware-04 | `agents/middlewares/read_before_write_middleware.py`
 
-- **链位 30/31 与收尾 32–35** —— 30/31 是扩展中间件的唯一合法并入点;32–35 是收尾段(含链 35 Clarification 人机核对点),对扩展"不可改写"——保证信任边界与终止性不被后插的代码绕过。
+- **链位 34/35 与收尾 36–39** —— 34/35 是扩展中间件的唯一合法并入点;36–39 是收尾段(含链 39 Clarification 人机核对点),对扩展"不可改写"——保证信任边界与终止性不被后插的代码绕过。
   出处:第 6 章 §2.4、§6
 
 ## C.4　上下文工程与信任分层
@@ -338,7 +338,7 @@
 - **models: 配置段** —— config.yaml 中以 provider 方言组织的模型清单(一家多家方言);运行时按名字解析到具体 provider 配置。
   出处:第 16 章 §16.1、§16.2
 
-- **create_chat_model(工厂)** —— 把模型配置变成可调用 chat model 的 12 步构造管线:方言解析、能力对齐、适配补丁、超时与流式选项,全部收敛于此。
+- **create_chat_model(工厂)** —— 把模型配置变成可调用 chat model 的构造管线:先归一化推理请求(契约/legacy),再走双分支装配(方言解析、能力对齐、适配补丁、超时与流式选项),全部收敛于此。
   出处:第 16 章 §16.3、第 5 章 §5.7
 
 - **能力矩阵(thinking / vision / reasoning_effort …)** —— 每个模型的声明能力(思考模式、视觉、reasoning_effort、context_window、流式用量、超时);框架按矩阵决定"能干什么、怎么调用"。
@@ -390,7 +390,7 @@
 - **extensions_config.json(内容模型)** —— MCP server 与技能的可写配置源:结构声明、来源路由与启用状态都在这里,经 Gateway API 可改;但顶层 `plugins:` 列表刻意留在 config.yaml 中由 operator 独控。
   出处:第 18 章 §4、第 14 章 §2
 
-- **五类扩展贡献点** —— 打包扩展可贡献的五类东西:中间件、task lifecycle、system-model observer、Gateway services、FastAPI HTTP routers;参考实现见 `examples/deerflow-extension-example/`。
+- **八类扩展贡献点** —— 打包扩展可贡献的八类东西:统一插件(unified plugin:前端模块 + 后端 action + 模型工具)、中间件、task lifecycle、system-model observer、agent-assembly observer、context-compaction observer、Gateway services、FastAPI HTTP routers;参考实现见 `examples/deerflow-extension-example/`。
   出处:第 18 章 §6、第 2 章 §2.6
 
 - **resolve_variable / resolve_class(反射)** —— 配置与扩展装配期的反射原语:按名字解析出变量或类,供中间件声明式注入与扩展顺序的确定性展开。

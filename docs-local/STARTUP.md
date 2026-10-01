@@ -44,7 +44,7 @@
 
 ```bash
 cd frontend
-pnpm dev          # 开发模式（Turbopack，热重载）
+pnpm dev          # 开发模式（默认 Webpack，热重载；DEER_FLOW_DEV_BUNDLER=turbo 可切 Turbopack）
 pnpm build        # 生产构建
 pnpm start        # 生产启动
 pnpm preview      # 构建后预览
@@ -212,7 +212,7 @@ PYTHONPATH=. uv run pytest -m "not live" tests/ -v                              
 
 # frontend 目录
 cd frontend
-pnpm dev         # Next.js dev + Turbopack
+pnpm dev         # Next.js dev；默认 Webpack（DEER_FLOW_DEV_BUNDLER=turbo 切 Turbopack）
 pnpm build       # 生产构建
 pnpm check       # ESLint + TypeCheck
 pnpm test        # 单元测试

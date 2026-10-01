@@ -1,20 +1,20 @@
 # 09 子代理并发、编排与容量治理
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写。
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10,v2.2.0-dev)编写。
 >
 > 本章覆盖文件:`packages/harness/deerflow/agents/middlewares/subagent_limit_middleware.py`、
 > `agents/middlewares/delegation_ledger.py`、`agents/middlewares/durable_context_middleware.py`、
 > `subagents/capacity.py`、`subagents/executor.py`、`subagents/batch_service.py`、
 > `config/subagent_runtime_config.py`、`config/subagent_batches_config.py`、`config/subagents_config.py`、
 > `runtime/runs/worker.py`、`tools/builtins/task_tool.py`、`agents/lead_agent/agent.py`、
-> `agents/lead_agent/prompt.py`。可配合 `docs-local/middleware/middleware-08-safety-guards.md`(链位 27
+> `agents/lead_agent/prompt.py`。可配合 `docs-local/middleware/middleware-08-safety-guards.md`(链位 31
 > 及 `stop_reason` 家族)阅读。
 
 先划清三个容易混为一谈的"限"——它们分属**三层不同的闸门**,本章逐一展开:
 
 | 闸门 | 计费对象 | 生效点 | 谁执行 | 默认 |
 |---|---|---|---|---|
-| ① 模型层并发/总量 | 本次模型响应内 `task` 调用数 / 本 run 已入账委托数 | 每次模型输出后(`after_model`) | `SubagentLimitMiddleware`(lead 链位 27) | 并发 3 / run 总量 6 |
+| ① 模型层并发/总量 | 本次模型响应内 `task` 调用数 / 本 run 已入账委托数 | 每次模型输出后(`after_model`) | `SubagentLimitMiddleware`(lead 链位 31) | 并发 3 / run 总量 6 |
 | ② 进程执行容量 | 同时占用的执行槽 | `SubagentExecutor` 真正跑模型之前 | `SubagentExecutionCapacity`(FIFO) | `max_running=3`、可排队 |
 | ③ 持久批量上限 | 一个 batch 的持久行 | batch 提交 / 领取时 | `SubagentBatchService` + 配置 | `default_max_live_items=100` 等 |
 
@@ -97,7 +97,7 @@ prompt/中间件广告出超过已创建进程控制器的容量——改 `subag
 
 ### 1.4 中间件:after_model 的确定性截断
 
-中间件挂在 lead 链位 27(`subagent_enabled` 时可选注册),实现 `after_model` / `aafter_model`,逻辑在
+中间件挂在 lead 链位 31(`subagent_enabled` 时可选注册),实现 `after_model` / `aafter_model`,逻辑在
 `_truncate_task_calls`:
 
 ```python
@@ -365,7 +365,7 @@ if result.cancel_event.is_set():
 
 ### 4.5 轮次轴:max_turns 与 GraphRecursionError
 
-子代理 `run_config.recursion_limit = max_turns`,耗尽时 `agent.astream` 抛 `GraphRecursionError`;
+子代理的 `max_turns` 不是直接当 `recursion_limit`:后者数值的是 LangGraph 图节点超步,`create_agent` 把每个中间件生命周期钩子编译成独立节点,故 `subagents/turn_budget.py::resolve_recursion_limit(max_turns, 装配链)` 从实际装配出的链推导乘数(`max(1, max_turns) × 每回合节点数 + 每次调用节点数`),把 `run_config.recursion_limit` 换算成"能买下 max_turns 个回合"的超步预算。耗尽时 `agent.astream` 抛 `GraphRecursionError`;
 `_aexecute` 的专用 except 分支(先于通用 `except Exception`)从最后流出的 chunk 抢救部分成果:
 **有可用部分输出 → `completed` + `stop_reason="turn_capped"`;没有 → `failed` + `turn_capped`**——父模型
 能区分"预算耗尽"与"子代理坏了",不必解析结果文本。子代理侧 `stop_reason` 经 ToolMessage 元数据随结果
@@ -394,10 +394,13 @@ sqlite/postgres)。
 `SubagentBatchService`(`subagents/batch_service.py`)是 Gateway(或显式直接 runtime)启动的后台任务:
 
 - 提交(`submit`)校验 `1 ≤ total ≤ max_items_per_batch`(默认 5000),批量写入 batch/item 行;
+  可选的 `max_live_items` / `max_running_items` 只在传 `None` 时回落配置默认值——显式 `0` **不再被静默当成"未设置"**,
+  而是被 `1 ≤ …` 的范围校验直接拒绝(`or` 会把 `0` 读成未设置、盖住调用方真实取值,`0` 恰是那个不对称的边界),并额外要求 `running ≤ live`;
 - 轮询器每 `poll_interval_seconds`(默认 1.0s)跑一轮 `run_once`:
   `available = max(0, max_running − 本进程在飞 item 数)`,有额度才 `claim_items`——
   以 `lease_owner = hostname:uuid` 原子领取到期/未领取的 item,每个 item 带 `lease_seconds=120` 租约;
 - `_execute_item` → `SubagentExecutor`(同一共享容量控制器)→ 有界结果入库;
+- **逐 item 验收清单**:每个 item 可自带 `acceptance_criteria`(`batch_task` 的 `BatchTaskItem` 字段),执行完成后经与普通 `task` 同一套确定性检查(`subagents/batch_acceptance.py::check_batch_acceptance`,持 owner-scoped 沙箱租约)得出 verdict;**verdict 可空**并随 item 持久化——`succeeded` 只代表执行完成,验收结论看对应 verdict(检查不可用时结果保持未检查);
 - **崩溃恢复**:worker 死在租约内,lease 过期后其他(或重启后的)领取者接管该 item;
 - **attempt 语义**:队列拒绝/排队超时发生在模型执行之前 → **退还 lease、不消耗该 item 的尝试次数**;
   真实执行失败与 lease 过期才消耗重试预算(`max_attempts=3`);用户取消 → 非终态 item 立即终态化 + 清
@@ -496,11 +499,11 @@ cancel_action = await run_manager.set_status_if_not_cancelled(
 
 | stop_reason | 守卫 | 触发 | 行为特征 |
 |---|---|---|---|
-| `loop_capped` | LoopDetectionMiddleware(28) | 重复工具调用/单工具频率爆炸 | 剥 tool_calls 强制终答 |
-| `token_capped` | TokenBudgetMiddleware(29) | 子代理 run token 超预算 | 剥 tool_calls 强制终答 |
-| `subagent_limit_capped` | SubagentLimitMiddleware(27) | run 委托总量耗尽后模型仍发 `task` | **剥掉的是 task 调用**,不是全部工具意图;content 追加可见说明 |
-| `safety_capped` | SafetyFinishReasonMiddleware(34) | provider 声明安全截断 | 剥残缺 tool_calls/回填 |
-| `model_length_capped` | ModelLengthFinishReasonMiddleware(33) | provider 长度截断 | 纯记账,不改消息 |
+| `loop_capped` | LoopDetectionMiddleware(32) | 重复工具调用/单工具频率爆炸 | 剥 tool_calls 强制终答 |
+| `token_capped` | TokenBudgetMiddleware(33) | 子代理 run token 超预算 | 剥 tool_calls 强制终答 |
+| `subagent_limit_capped` | SubagentLimitMiddleware(31) | run 委托总量耗尽后模型仍发 `task` | **剥掉的是 task 调用**,不是全部工具意图;content 追加可见说明 |
+| `safety_capped` | SafetyFinishReasonMiddleware(38) | provider 声明安全截断 | 剥残缺 tool_calls/回填 |
+| `model_length_capped` | ModelLengthFinishReasonMiddleware(37) | provider 长度截断 | 纯记账,不改消息 |
 
 两个特殊点值得写死:
 
@@ -542,6 +545,6 @@ cancel_action = await run_manager.set_status_if_not_cancelled(
 batch 另走持久 lease 调度。默认(3/6/3)让轻量部署开箱即用,放大旋钮也有序:先升 `subagent_runtime.max_running`,
 再升并发请求值,最后调 `max_total_per_run`——**任何一层都不应单独超过其下层的能力**。
 
-> 延伸阅读:`docs-local/middleware/middleware-08-safety-guards.md`(链位 27-35 与 stop_reason 家族)、
+> 延伸阅读:`docs-local/middleware/middleware-08-safety-guards.md`(链位 31-39 与 stop_reason 家族)、
 > `middleware-03-error-handling.md`(工具失败语义)、子代理 executor 的 step 事件与结果持久化见
 > harness AGENTS "Subagent System" 段。

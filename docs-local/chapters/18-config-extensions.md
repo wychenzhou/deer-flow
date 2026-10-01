@@ -1,6 +1,6 @@
-# 18 · 配置体系与扩展机制:双层配置、热重载边界与五类扩展贡献点
+# 18 · 配置体系与扩展机制:双层配置、热重载边界与八类扩展贡献点
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10,版本 2.2.0-dev)编写
 
 本章把 DeerFlow 的"配置 + 扩展"合起来讲——它们不是两件事,而是同一件事的两面:
 **配置文件就是扩展机制的入口**,扩展机制的每一条缝都开在配置模型上。读懂本章,你
@@ -28,7 +28,7 @@
 
 | 文件 | 模板 | 谁写 | 挂载 | 解析器 |
 |---|---|---|---|---|
-| `config.yaml` | `config.example.yaml`(config_version 39) | operator 手工 / `make setup` | Docker 中 `:ro` 只读 | `AppConfig.from_file()`(YAML) |
+| `config.yaml` | `config.example.yaml`(config_version 50) | operator 手工 / `make setup` | Docker 中 `:ro` 只读 | `AppConfig.from_file()`(YAML) |
 | `extensions_config.json` | `extensions_config.example.json` | operator 手工 **+ Gateway API 运行期写** | Docker 中读写 | `ExtensionsConfig.from_file()`(JSON) |
 
 这一分工不是文件格式偏好,而是**代码执行信任边界**:
@@ -111,7 +111,7 @@ _apply_singleton_configs()       # title/summarization/memory/... 单例配置�
 
 ### 2.2 `config_version`:版本闸门与 `make config-upgrade`
 
-`config.example.yaml` 顶部有 `config_version`(当前 39)。启动时
+`config.example.yaml` 顶部有 `config_version`(当前 50)。启动时
 `_check_config_version` 拿用户文件与 example 文件(沿 config.yaml 目录向上最多找 5 层)
 对比:用户版本低就打 warning——"run `make config-upgrade`"。缺失 `config_version`
 按 0(前版本化时代)处理;example 缺失也按 0。改 schema 的 commit 必须同步 bump
@@ -223,7 +223,7 @@ per-run 项(`models[*].max_tokens`、`tools[*]`)、agent 系统提示词……�
 
 ```python
 class ExtensionsConfig(BaseModel):
-    middlewares: list[str]      # "module.path:ClassName",resolve_class 实例化进 agent 链(§5)
+    middlewares: list[str | ConfiguredMiddlewareSpec]  # 裸类路径串,或 {class, kwargs};resolve_class 实例化进 agent 链(§5)
     mcp_servers: dict[str, McpServerConfig]   # alias="mcpServers"
     skills: dict[str, SkillStateConfig]       # skill 名 → {enabled}
 ```
@@ -234,8 +234,8 @@ example 文件里出现但 schema 未声明(`mcpInterceptors` 等)的内容靠 `
 `McpServerConfig` 才是大头,一个服务器条目的完整能力(本 commit):
 
 - **传输**:`type: stdio|sse|http`(兼容 MCP 官方 schema 的 `transport` 别名,二者并存时
-  `type` 优先——model_validator `_accept_transport_alias`);`command/args/env`(stdio)与
-  `url/headers`(sse/http);
+  `type` 优先——model_validator `_accept_transport_alias`);`command/args/env`(stdio,另加
+  可选的 `cwd` 指定子进程工作目录)与 `url/headers`(sse/http);
 - **凭据注入三件套**:静态 `headers`(仅启动期工具发现用)、`oauth`
   (`client_credentials`/`refresh_token` 客户端模式,含 refresh_skew_seconds 等细粒度参数)、
   `user_auth`(per-user 凭据映射,值支持 `$ENV_VAR`)、`headers_from_context`
@@ -291,9 +291,9 @@ schema 层面就分家了:JSON 文件里写 `plugins:` 是无效字段,loader �
 | | 配置声明中间件 | 插件贡献中间件 |
 |---|---|---|
 | 声明处 | `extensions.middlewares`(config.yaml 或 extensions_config.json) | Python 插件 `plugins:` → `registry.middlewares(...)` |
-| 载体 | `"module.path:ClassName"` 字符串 | `MiddlewarePlacement`(类实例 + Placement + scope + order) |
-| 实例化 | `resolve_class(path, AgentMiddleware)` → **零参构造**,每次 agent 构建都现造 | 插件 `install()` 期已造好;每次注入被 `IsolatedMiddleware` 包一层 |
-| 类型限制 | 无参构造的 AgentMiddleware;lead/subagent 共用同一张列表 | 任意 AgentMiddleware + 声明式 Placement/scope |
+| 载体 | `"module.path:ClassName"` 字符串,**或** `{class, kwargs}` 对象 | `MiddlewarePlacement`(类实例 + Placement + scope + order) |
+| 实例化 | `resolve_class(path, AgentMiddleware)` → **零参构造**;`{class, kwargs}` 形式则 `middleware_cls(**kwargs)`,每次 agent 构建都现造 | 插件 `install()` 期已造好;每次注入被 `IsolatedMiddleware` 包一层 |
+| 类型限制 | 无参或 `{class, kwargs}` 构造的 AgentMiddleware;lead/subagent 共用同一张列表 | 任意 AgentMiddleware + 声明式 Placement/scope |
 | 位置 | 固定槽:built-ins/程序自定义之后、terminal/safety/clarification 尾巴之前(链位 31) | 由 Placement 锚点决定(MODEL_LOGICAL…TOOL_RAW,§7) |
 | 隔离 | **无**——异常直接沿 LangChain 调用链炸(失败即 loud) | **有**——`IsolatedMiddleware` 包一层,观察失败降级诊断、调用放行(§7.3) |
 | 信任注释 | "视为可信 operator 配置;路径实例化任意代码" | 安装即执行第三方代码,只信 operator 源 |
@@ -301,11 +301,16 @@ schema 层面就分家了:JSON 文件里写 `plugins:` 是无效字段,loader �
 两条路径在中间件装配里先后执行:`build_middlewares()` 先
 `load_configured_extension_middlewares(app_config)` 把配置声明的类路径实例化追加进链
 (链位 31),函数尾部再调 `compose_with_extensions()` 把插件贡献按锚点注入(§7.2)。
+配置声明条目自 2.2.0 起支持两种形态(`configured_extensions.py`):裸字符串
+`module.path:ClassName`,或 `{class: ..., kwargs: {...}}` 对象——后者给构造函数传参,且
+**kwargs 值必须是 JSON 类型**(object/array/string/number/boolean/null);YAML 的日期与时间戳
+会被强制转成 ISO 字符串以匹配 JSON。config.example.yaml 的 `extensions:` 注释块给出了两种
+形态的并列示例(见 §A.13)。
 配置声明路径"loud fail"是有意为之:middlewares/AGENTS.md 写明缺失包、非法类、坏模块
 **必须在 agent 创建时大声失败**——这是 operator 亲手写的信任声明,静默跳过等于
 带病上线。
 
-## 6. extension-api:契约包与五类贡献点
+## 6. extension-api:契约包与八类贡献点
 
 ### 6.1 包边界:为什么契约要独立成包
 
@@ -319,14 +324,14 @@ schema 层面就分家了:JSON 文件里写 `plugins:` 是无效字段,loader �
 (langchain/langgraph/fastapi)保持为扩展自己的直接依赖。宿主侧实现
 (`deerflow.extensions.*`)与契约通过 Protocol + 结构类型对接。
 
-契约版本号 `API_VERSION = "0.2.0"`。兼容窗口规则(`loader._compatible`):
+契约版本号 `API_VERSION = "0.2.4"`。兼容窗口规则(`loader._compatible`):
 
 - **0.x**:minor 可能 break,窗口 = 同 major.minor,补丁只增——`host >= declared`;
 - **>=1.0**:同一 major 内契约只增不减,新 host 兼容旧扩展;**按更新 minor 写的扩展被拒**
   (它会够到宿主没实现的契约新增);
 - 版本不可解析 → 拒绝(不放过)。
 
-扩展安装入口用可选装饰器 `@extension(api="0.2.0", name="example")` 盖章
+扩展安装入口用可选装饰器 `@extension(api="0.2.4", name="example")` 盖章
 (`__deerflow_api__` 属性)。pip 依赖解析本是主兼容机制,这个章盖给 `--no-deps` 安装和
 monorepo editable checkout 兜底——把深层的 AttributeError 转成启动期可操作的诊断:
 "extension requires extension-api X, host provides Y. Install a matching version: pip
@@ -344,10 +349,11 @@ example = "deerflow_extension_example:install"
 
 入口签名固定为 `install(registry: ExtensionRegistry, config: Mapping[str, Any])`。
 扩展看到的 `ExtensionRegistry` 是**只写、结构化最小**的契约(宿主实现另有 attribution、
-rollback、build 等宿主机,刻意不进契约),七个注册方法全部带默认实现(后续加方法保持
+rollback、build 等宿主机,刻意不进契约),八个注册方法全部带默认实现(后续加方法保持
 additive):
 
 ```python
+registry.plugin(contribution)                 # → 统一插件:前端模块 + 后端 action + 模型工具
 registry.middlewares(contributor)            # → 贡献 AgentMiddleware(带 Placement)
 registry.task_lifecycle(contributor)         # → on_task_start / on_task_stop
 registry.system_model_observer(observer)     # → on_system_model_call(系统侧模型调用)
@@ -357,37 +363,49 @@ registry.service(service)                    # → ExtensionService: start/stop
 registry.routers((router,))                  # → FastAPI APIRouter(启动期已构造好)
 ```
 
-仓库文档(根 AGENTS.md 与参考扩展 README)把贡献点归纳为**五类**:
-**middleware / task lifecycle / system-model observer / Gateway service / FastAPI
-HTTP router**,`examples/deerflow-extension-example/` 每个都给了刻意做小的实现。
-`agent_assembly_observer` 与 `context_compaction_observer` 是注册面上真实存在、但
-尚在参考扩展之外的另两个观察口(assembly 观察 agent 图装配、compaction 观察上下文
-压缩),写扩展时以 `deerflow_extension_api.contracts.ExtensionRegistry` 的实际签名为准。
+仓库文档(根 AGENTS.md 与参考扩展 README)把贡献面归纳为**八类**:
+**unified plugins / middleware / task lifecycle / system-model observer /
+agent-assembly observer / context-compaction observer / Gateway service /
+FastAPI HTTP router**。`examples/deerflow-extension-example/` 对多数贡献点给了刻意做小的
+实现;`agent_assembly_observer` 与 `context_compaction_observer` 是注册面上真实存在、但
+参考扩展尚未演示的两个观察口(前者观察 agent 图装配产物,后者观察上下文压缩事件)。
+写扩展时以 `deerflow_extension_api.contracts.ExtensionRegistry` 的实际签名为准。
 
-五类的语义要点:
+八类的语义要点:
 
-1. **Middleware**(`MiddlewareContributor.contribute_middlewares(app_store, ctx)`):
+1. **Unified plugin**(`registry.plugin(PluginContribution)`,2.2.0 新增):一个可信安装包用
+   单一身份(一个 namespace)同时贡献**前端浏览器模块**、**后端 action** 与**模型工具**。
+   `PluginContribution` 字段:`namespace`(唯一,重复即拒)、`title`/`description`、
+   宿主持有的布尔 `enabled`、非秘密 `fields`(`SettingsField`)、`frontend`
+   (`BrowserModule`(自包含代码)或 `BrowserAssets`(安装包内带版本清单的静态文件))、
+   `backend`(`BackendAction`:name + async handler)、`tools`(`ModelTool`:name/description/
+   input_schema/handler/group)、契约版本 `api_version`(目前恒为 1,不符直接 `ValueError`)。
+   至少贡献 browser 模块/后端 action/模型工具之一,否则报错;前端模块名也不得重复。后端
+   action 跑在 Gateway 进程内,宿主每次调用下发**当前 settings 与已认证 principal**——这不是
+   沙箱。该贡献点落地为 `/api/plugins` 路由与 `plugin_action`/`plugin_management` 授权资源
+   (见 16.7 / 17 §4.3)。
+2. **Middleware**(`MiddlewareContributor.contribute_middlewares(app_store, ctx)`):
    返回 `MiddlewarePlacement` 序列,每个含 `middleware`、`placement`(五个 Placement 之一)、
    `scope`(AgentScope.LEAD/SUBAGENT/BOTH,位标志)、`order`(int)。宿主在注入时做全部
    类型校验(必须是 AgentMiddleware、scope/placement 必须合法、order 必须是 int 非 bool),
    非法的条目只记诊断、跳过,不拖垮整个插件(§7.2)。
-2. **Task lifecycle**(`TaskLifecycleContributor`):`on_task_start/on_task_stop` 收到
+3. **Task lifecycle**(`TaskLifecycleContributor`):`on_task_start/on_task_stop` 收到
    `TaskInfo`(task_id/run_id/thread_id/kind=lead|subagent/parent_task_id/agent_name/
    resumed)与 `TaskOutcome`(completed/aborted/failed)。lead 的 task_id 恒等于 run_id
    (含 continuation),`notify.py` 提供 `lead_task_id` 与 lead/subagent 两侧的结果分类器。
-3. **System-model observer**(`SystemModelCallObserver.on_system_model_call`):观察
+4. **System-model observer**(`SystemModelCallObserver.on_system_model_call`):观察
    **不被中间件模型钩子覆盖的系统自有模型调用**——goal 评估、记忆抽取、标题生成、
    摘要(SystemOperationKind.GOAL/MEMORY/TITLE/SUMMARIZATION)。`SystemModelRequest` 是
    调用前只读快照(messages 被 `__post_init__` 归一化成 tuple,防标题/摘要传单条 prompt
    字符串时被当字符序列遍历);`SystemModelResult` 是成败快照(response/error/
    duration_ms)。
-4. **Gateway service**(`ExtensionService`):`start(deps)` / `stop()`。`deps` 是
+5. **Gateway service**(`ExtensionService`):`start(deps)` / `stop()`。`deps` 是
    `ExtensionRuntimeDeps`——宿主基础设施就绪后才绑定:`app_store`、`policy`
    (HostPolicySnapshot,宿主强制的预算/限额投影,刻意不暴露 AppConfig 以免把扩展钉死在
    harness 发布节奏上)、`session_factory`。宿主按注册顺序 start、逆序 stop(每项独立
    30s 预算,超时/取消/异常都 fail-open 记诊断);启动被取消或失败的项仍登记为
    "已尝试",关机时同样拥有 stop()。
-5. **FastAPI router**(`registry.routers(...)`):路由对象在 install 期**急切构造**,宿主
+6. **FastAPI router**(`registry.routers(...)`):路由对象在 install 期**急切构造**,宿主
    挂载前做严格预检(`include_contributed_routers` + `_router_routes`):不得带
    on_startup/on_shutdown 或自定义 lifespan(生命周期请注册成 service);不得含
    WebSocket 路由(宿主还没法做认证与 Origin 检查);不得含 Starlette Mount;**不得进入
@@ -398,6 +416,13 @@ HTTP router**,`examples/deerflow-extension-example/` 每个都给了刻意做小
    与"是管理员"仍是两回事——路由内用 `deerflow_extension_api.auth` 的
    `resolve_principal(request)` / `require_admin(request)`,读取宿主装在 app.state 的
    resolver,拿到的是身份的中性投影而非宿主的 auth 上下文。
+7. **Agent-assembly observer**(`AgentAssemblyObserver.on_agent_assembled`):在 agent
+   构造结束时**同步**回调,拿到 `AgentAssemblyDescriptor`(装配产物描述符)。同步是刻意的
+   ——构造本身没有事件循环可 await,而描述符必须在图被交给调用方之前捕获;实现必须廉价
+   且不得抛异常。
+8. **Context-compaction observer**(`ContextCompactionObserver.on_context_compacted`,async):
+   观察上下文压缩事件,回调同时收到应用级 `app_store`、任务级 `task_store` 与
+   `CompactionEvent`(本轮压缩的前后快照与决策依据)。
 
 ### 6.3 作用域存储:`ExtensionData`
 
@@ -567,7 +592,7 @@ IsolatedMiddleware 后取类型,违规时列出违规索引并归因:`provenance
 一个 commit 里发布与部署,不存在两套版本号可以漂移——`config.example.yaml` 的 schema
 演进、`STARTUP_ONLY_FIELDS` 的注册、`compose_with_extensions` 的锚点表,全部随仓库
 原子变更。真正需要独立版本管理的是**契约**,而它被拆成了独立的
-`deerflow-extension-api`(API_VERSION = "0.2.0",§6.1):参考扩展在 pyproject 里声明
+`deerflow-extension-api`(API_VERSION = "0.2.4",§6.1):参考扩展在 pyproject 里声明
 `deerflow-extension-api>=0.2,<0.3`——宿主与扩展之间唯一允许漂移、且被显式管理的版本
 关系就是这一条,运行时由 `__deerflow_api__` 标记 + loader 兼容窗口兜底。
 
@@ -641,10 +666,12 @@ console script 派发),只暴露五个面:`install SOURCE [--yes] [--required]`�
 ```
 config.yaml ──plugins:──► load_extensions()(启动期一次)──► LoadedExtensions(不可变快照)
    │  ▲                            attributed/rollback/Diagnostic      │
-   │  └─ resolve_env_variables / resolve_class / AppConfig             ├─ middlewares → compose_with_extensions
-extensions_config.json ──► ExtensionsConfig ──merge──► AppConfig.extensions  │   → anchors → inject → Isolated → assert_ordering
-   │  (API 可写:/api/mcp/config、技能开关,写后 reload)                  ├─ task_lifecycle / system_model_observer
-   ▼                                                                    │   → notify → ExtensionData(app/task)
-MCP 服务器 / 技能 / 声明式中间件                                       ├─ services → start(注册序)/ stop(逆序,30s/项)
+   │  └─ resolve_env_variables / resolve_class / AppConfig             ├─ plugins → /api/plugins(前端模块+后端 action+模型工具)
+extensions_config.json ──► ExtensionsConfig ──merge──► AppConfig.extensions │  → plugin_action/plugin_management 授权
+   │  (API 可写:/api/mcp/config、技能开关,写后 reload)                  ├─ middlewares → compose_with_extensions
+   ▼                                                                    │   → anchors → inject → Isolated → assert_ordering
+MCP 服务器 / 技能 / 声明式中间件                                       ├─ task_lifecycle / system_model_observer
+                                                                        │   → notify → ExtensionData(app/task)
+                                                                        ├─ services → start(注册序)/ stop(逆序,30s/项)
                                                                         └─ routers → include_contributed_routers(预检后挂载)
 ```

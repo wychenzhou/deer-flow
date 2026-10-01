@@ -1,17 +1,19 @@
-# I/O 安全中间件：模型输入/输出通道的净化 · 预算 · 配对（链位 1、2、3、7）
+# I/O 安全中间件：模型输入/输出通道的净化 · 预算 · 配对 · PII 脱敏（链位 1、2、3、4、8，及紧随 1 之后的 KnowledgeScope）
 
-> 这四个中间件守在「进/出模型的通道」上，共同回答三个底层问题：**进模型的内容可不可信**（用户输入与远程网页都可能伪造框架上下文）、**体量合不合理**（巨型工具输出撑爆上下文）、**结构对不对**（调用与结果不配对时严格 provider 直接 400）。
+> 本篇覆盖守在「进/出模型的通道」上的中间件，共同回答几个底层问题：**进模型的内容可不可信**（用户输入与远程网页都可能伪造框架上下文）、**进模型的内容要不要脱敏**（用户消息与远程结果里的 PII）、**执行范围该暴露多少**（知识范围）、**体量合不合理**（巨型工具输出撑爆上下文）、**结构对不对**（调用与结果不配对时严格 provider 直接 400）。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 [目录索引](README.md)。
-> 同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`（#3857，链位 11）不在本篇范围，见 [04](middleware-04-file-safety.md)。
+> 同族的 I/O 写侧守卫 `ReadBeforeWriteMiddleware`（#3857，链位 13）不在本篇范围，见 [04](middleware-04-file-safety.md)。
 
 ## 本文件覆盖的中间件
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 攻击面/故障面 | 关键 issue |
 |---|---|---|---|---|---|
 | 1 | `InputSanitizationMiddleware` | 净化用户输入、中和框架标签 | `wrap_model_call`（最外） | 用户消息伪造框架标签 | #3630 |
+| （随 1 之后，不占独立链位） | `KnowledgeScopeMiddleware` | 只暴露 Gateway 准入的执行范围、抹除范围/展示数据 | `before_agent` + `wrap_model_call` + `wrap_tool_call` | 越界知识范围 / 展示数据泄漏 | — |
 | 2 | `ToolOutputBudgetMiddleware` | 超预算工具结果外化/截断 | `wrap_tool_call` + `wrap_model_call` | 超大工具输出 | #3416 |
 | 3 | `ToolResultSanitizationMiddleware` | 中和远程抓取内容的注入标签 | `wrap_tool_call` | 远程抓取内容伪造框架标签 | — |
-| 7 | `DanglingToolCallMiddleware` | 补配对 / 丢孤儿 / 修畸形调用 | `wrap_model_call`（最内） | 悬挂调用 / 孤儿结果 / 畸形调用 | #2894 |
+| 4 | `PiiRedactionMiddleware` | 用户消息 / 远程结果里的 PII 不可逆脱敏（可选，默认关） | `wrap_model_call` + `wrap_tool_call`（Layer‑1 最内） | 用户/远程内容里的 PII | #3190 |
+| 8 | `DanglingToolCallMiddleware` | 补配对 / 丢孤儿 / 修畸形调用 | `wrap_model_call`（最内） | 悬挂调用 / 孤儿结果 / 畸形调用 | #2894 |
 
 辅助模块：`tool_output_synopsis.py`（确定性的工具输出概要生成器）、`tool_call_metadata.py`（保持 AIMessage 原始 provider tool-call 元数据同步）。
 
@@ -49,7 +51,7 @@ before_agent                          ← 每 run 一次（入口节点）
 
 | 钩子 | 触发 | 典型用途 | 仓库实例 |
 |---|---|---|---|
-| `before_agent` / `abefore_agent` | 每 run 一次，Agent 循环启动前 | 一次性 setup；把"初始化即应持久"的东西写进 state | ThreadData 建线程目录、Uploads 注入上传清单、SandboxMiddleware `acquire` 后存 `sandbox_id`、TodoList 建初始计划 |
+| `before_agent` / `abefore_agent` | 每 run 一次，Agent 循环启动前 | 一次性 setup；把"初始化即应持久"的东西写进 state | ThreadData 建线程目录、Uploads 注入上传清单、SandboxMiddleware `acquire` 后存 `sandbox_id`、TodoList 建初始计划、KnowledgeScope 从当前用户消息读取准入知识范围写进 runtime context |
 | `after_agent` / `aafter_agent` | 每 run 一次，循环收尾后 | 资源释放、run 级结论回写、把消息排队给旁路系统 | SandboxMiddleware `release`、Memory 排队异步记忆抽取 |
 | `before_model` / `abefore_model` | 每轮模型调用前 | 站在 state 上"为这一轮做准备"：压缩/改写历史、写一个让本轮可见的决定 | Summarization 判定并执行压缩、McpRouting 写入 minimal `promoted` state 让延迟工具本轮可见 |
 | `after_model` / `aafter_model` | 每轮模型调用后 | 读本轮 AIMessage 做**终局判断与记账**：该不该停/该不该放行工具、打标、归因、弃用不需要的兄弟调用 | SafetyFinishReason 检测安全终止并抑制工具、ModelLength 记 `model_length_capped`、TokenUsage 归因、Title 起标题、Clarification 丢弃同轮 sibling、LoopDetection 识别重复调用并硬停 |
@@ -61,8 +63,8 @@ before_agent                          ← 每 run 一次（入口节点）
 
 | 钩子 | 触发 | 典型用途 | 仓库实例 |
 |---|---|---|---|
-| `wrap_model_call` / `awrap_model_call` | 包裹每一次模型请求 | 只改"发给模型这一份"的载荷（不落盘），或对调用本身做重试/短路/降级 | InputSanitization(#1) 净化、ViewImage 注入 base64、SkillActivation 注入 SKILL.md 正文、Dangling(#7) 补配对、SystemMessageCoalescing 合并系统消息、ToolOutputBudget 模型侧截历史巨文、LLMErrorHandling 重试归一、TerminalResponse 空回复重试一次 |
-| `wrap_tool_call` / `awrap_tool_call` | 包裹每一次工具执行 | 执行前拦截（放不放行、改不改参），执行后改写结果 | ReadBeforeWrite 读改写门、SandboxAudit 审计、SkillToolPolicy 拦越权执行、ToolResultSanitization(#3) 中和、ToolOutputBudget 工具侧外化、ToolProgress/ToolReceipt 打标计时、Clarification 用 `Command(goto=END)` 中断问人 |
+| `wrap_model_call` / `awrap_model_call` | 包裹每一次模型请求 | 只改"发给模型这一份"的载荷（不落盘），或对调用本身做重试/短路/降级 | InputSanitization(#1) 净化、KnowledgeScope 抹除消息里的范围/展示数据并按 disabled 摘掉 `knowledge_search`、PiiRedaction 对真实用户消息做 PII 脱敏、ViewImage 注入 base64、SkillActivation 注入 SKILL.md 正文、Dangling(#8) 补配对、SystemMessageCoalescing 合并系统消息、ToolOutputBudget 模型侧截历史巨文、LLMErrorHandling 重试归一、TerminalResponse 空回复重试一次 |
+| `wrap_tool_call` / `awrap_tool_call` | 包裹每一次工具执行 | 执行前拦截（放不放行、改不改参），执行后改写结果 | ReadBeforeWrite 读改写门、SandboxAudit 审计、SkillToolPolicy 拦越权执行、ToolResultSanitization(#3) 中和、PiiRedaction 对远程工具结果脱敏、KnowledgeScope 在 disabled 时拦 `knowledge_search`、ToolOutputBudget 工具侧外化、ToolProgress/ToolReceipt 打标计时、Clarification 用 `Command(goto=END)` 中断问人 |
 
 一个中间件可以同时实现多组钩子：ToolOutputBudget 左右开弓（工具侧外化 + 模型侧兜底），
 DurableContext 三种都用（`before/after_model` 维护持久上下文 + `wrap_model_call` 做 per-request
@@ -82,7 +84,7 @@ DurableContext 三种都用（`before/after_model` 维护持久上下文 + `wrap
   state**。想"临时给模型看一段、但不想让这段留在历史/被重复发送"——base64 图片、SKILL.md 正文、
   当轮净化后的干净视图——只有这道缝做得到。
 - 改返回的**响应/结果**（`wrap_model_call` 返回的模型消息、`wrap_tool_call` 返回的 `ToolMessage`/
-  `Command`）→ 和正常产出一样经 `add_messages` 落进图状态，**持久事件**。本文件里 #1、#7 净化和
+  `Command`）→ 和正常产出一样经 `add_messages` 落进图状态，**持久事件**。本文件里 #1、#8 净化和
   补配对都发生在请求侧所以是瞬时的，而 #3 中和、#2 外化的对象是工具**结果**所以落盘——差异的本质
   是改造对象，不是中间件的意图。
 - 状态钩子返回的 dict 并入 state → 同样持久，且因它是独立图节点、写入被其他节点看到。
@@ -99,14 +101,20 @@ DurableContext 三种都用（`before/after_model` 维护持久上下文 + `wrap
 注册在 lead 链最尾，靠这条逆序 `after_model` 反而**第一个**跑，好让它对安全终止的抑制先于外层
 中间件可见（见 middlewares/AGENTS.md 的注释）。
 
-### 0.4 本文件四个主角为什么只用 wrap 两类钩子
+### 0.4 本文件主角为什么主要只用 wrap 两类钩子
 
-四个中间件守卫的都是**通道字节**（进/出模型的载荷、工具结果回传的原始字节），而状态钩子够不着
+这些中间件守卫的大多是**通道字节**（进/出模型的载荷、工具结果回传的原始字节），而状态钩子够不着
 这些：等 `after_model` 能读到工具结果时，它早已作为 ToolMessage 落进 state，你既拿不到"执行前
 改写调用"的机会，也无法把一次**不落盘的净化**只施加给本次请求。所以净化类选请求侧 `wrap_model_call`
-（#1、#7 要的就是"只这一份干净，checkpoint 留原貌"），结果改写类选 `wrap_tool_call`（#2、#3 的
-产物要持久）。这四个只用两类钩子是这个原则的推论，不是钩子面本身就这么窄——本系列其余文件会用到
-状态钩子，判断"钩在哪道缝"的标准始终是 0.2 的两把尺子。
+（#1、#8 要的就是"只这一份干净，checkpoint 留原貌"），结果改写类选 `wrap_tool_call`（#2、#3、#4 的
+产物要持久）。这几个中间件主要只用 wrap 两类钩子是这个原则的推论，不是钩子面本身就这么窄——本系列
+其余文件会用到状态钩子，判断"钩在哪道缝"的标准始终是 0.2 的两把尺子。
+
+> 一个例外是 `KnowledgeScopeMiddleware`：它先用 `before_agent` 在**当前用户消息**里读取准入范围、
+> 写进 runtime context（状态钩子做"一次性读取 + 边界校验"），再用 `wrap_model_call` 把范围/展示数据
+> 从模型消息里抹掉、按 disabled 摘掉 `knowledge_search` 的 schema，并在 `wrap_tool_call` 上拦下 disabled
+> 状态下的 `knowledge_search` 调用（包裹钩子做"每次请求擦除与拦截"）。它同时用到两类钩子，是"钩在
+> 哪道缝取决于产物住在哪里"的现成例子。
 
 中间件链的装配见 `tool_error_handling_middleware.py::_build_runtime_middlewares`（lead 与 subagent
 共享基座），编号即物理顺序，链末有 `deerflow.extensions.ordering` 一次性校验顺序不变量，任何
@@ -142,7 +150,7 @@ DurableContext 三种都用（`before/after_model` 维护持久上下文 + `wrap
 ### 钩子与执行时机
 
 - **链上第 1 位，`wrap_model_call` / `awrap_model_call` 的最外层**。因为先装配=外层，它拿到的是
-  **原始入站请求**，净化后的消息才是所有内层中间件（含 LLM 重试、第 7 位的 Dangling 补丁）看到的
+  **原始入站请求**，净化后的消息才是所有内层中间件（含 LLM 重试、第 8 位的 Dangling 补丁）看到的
   样子——"净化只做一次、所有人共享干净视图"。
 - 只做 **per-request 改写**（`request.override(messages=...)`），**从不写 state、从不改原始 request 对象**
   （代码注释明示 "the original request is never mutated"）。失败也绝不让模型饿死：**fail-open**——
@@ -221,7 +229,7 @@ key 是合法非空字符串 → 用 `rfind` 只净化用户后缀、服务端�
 - **与第 3 位 ToolResultSanitization 构成「两个不可信入口」的对称防御**：用户输入由 #1 中和，
   远程内容由 #3 中和，共用同一个 `neutralize_untrusted_tags` 原语——同一个伪造 `<system-reminder>`
   无论从哪个入口进来，都被转义成同一种字面量。
-- 位于链首使它的净化**先于一切内层改写**：第 2 位的预算截断、第 7 位的悬挂修复处理的都是
+- 位于链首使它的净化**先于一切内层改写**：第 2 位的预算截断、第 8 位的悬挂修复处理的都是
   已净化的干净文本，不会把注入标签"截"进摘要或"复制"进合成消息。
 - 用 denylist 而非 allowlist 是刻意决策：框架自己就把结构化标签声明为受信内部数据，allowlist
   意味着每次加新框架块都要改净化器，denylist 配合数量钉死测试则让"漏加"在 CI 期就爆出来。
@@ -233,6 +241,54 @@ key 是合法非空字符串 → 用 `rfind` 只净化用户后缀、服务端�
 只做两件事）→ `frame_untrusted_text`（幂等包裹）→ `_process_request`（主流程：从后往前找真实用户
 消息、处理 `original_user_content` 的四种分支）→ `_try_process`（fail-open 边界）。
 配套：`message_utils.py::is_genuine_user_message`。
+
+---
+
+## 1′. KnowledgeScopeMiddleware（紧随链上第 1 位，不占独立链位）
+
+**源码**：`agents/middlewares/knowledge_scope_middleware.py`；支持模块 `deerflow/knowledge_scope.py`
+（`KNOWLEDGE_SCOPE_KEY` / `KNOWLEDGE_SCOPE_RUNTIME_KEY` / `canonicalize_knowledge_scope` /
+`execution_scope` / `strip_message_knowledge_scope`）。
+
+### 它解决什么问题
+
+第 1 位管的是"用户输入里有没有伪造的框架标签"，但还有一种越权不是标签伪造、而是**范围本身**：
+Gateway 在一次请求里会对本次 run 准入一段"知识范围"（哪些知识库/来源可见、是否启用知识检索）。
+这段范围必须**只暴露准入的部分**，且**不能作为可见数据回灌给模型**——消息里携带的范围/展示数据
+（`knowledge_scope`）若原样发给 provider，等于把准入边界当普通上下文交给模型，模型既可能读到不该读
+的展示字段，也可能据此推理出未准入的来源。它紧跟在第 1 位之后装配，是因为范围与用户消息一样需要
+"进模型前先清洗"，与净化同属"模型入站通道"的守门。
+
+### 钩子与执行时机
+
+三个钩子、三种职责（装配列表里紧接着 `InputSanitizationMiddleware`）：
+
+- **`before_agent`（状态侧，一次性读取）**：从 runtime context 读已准入的范围（`KNOWLEDGE_SCOPE_RUNTIME_KEY`）；
+  没有则从**当前 run 新增的**消息里取——`CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY` 给出 checkpoint 边界，
+  只在边界之后的消息里找带 `knowledge_scope` 的 `HumanMessage`；standalone harness 调用方没有边界时
+  **只认最后一条输入消息**，绝不回扫任意历史。校验纪律是 fail-closed：`knowledge_scope` 只能挂在
+  `HumanMessage` 上（否则 `ValueError`），且**最多一条**当前 HumanMessage 可携带（否则 `ValueError`）。
+- **`wrap_model_call`（每次请求擦除 + 摘工具）**：把每条消息用 `strip_message_knowledge_scope` 抹掉范围
+  数据；若当前范围 `mode == "disabled"`，把 `knowledge_search` 的 schema 从 `request.tools` 摘掉。
+  无变化时返回**原 request 对象**（零开销快路径）。
+- **`wrap_tool_call`（执行侧拦截）**：范围 disabled 时，即便模型从历史/幻觉拼出 `knowledge_search` 调用，
+  也直接返回 `status="error"` 的 ToolMessage（`"Error: Knowledge search is disabled for this turn."`），
+  不进入 handler。
+
+### 与邻居的关系
+
+- **与第 1 位 InputSanitization 同属"模型入站"**：一个中和伪造标签、一个收敛范围数据；顺序上它紧跟在
+  第 1 位之后（`outer_wrappers` 列表的第二项），保证"净化后的用户消息"才进入范围读取。
+- **与 McpRouting/DeferredToolFilter 的"隐藏 schema"手法同构但目的不同**：那边管"延迟工具 schema 何时
+  可见"（带宽/注意力），这里管"知识检索能力是否对本次 run 可见"（准入边界）——都是 `wrap_model_call`
+  上裁 `request.tools`。
+- 它**不读存储、不触发 RAGFlow**：disabled 只是"不暴露能力"，工具本身不会被调用。
+
+### 源码阅读指引
+
+`knowledge_scope_middleware.py`：`before_agent`（边界判定 + 单条/类型校验）→ `_prepare_model_request`
+（抹除 + disabled 摘 `knowledge_search`）→ `_disabled_tool_message`（执行侧拦截）→ `_scope_from_runtime`。
+配套 `deerflow/knowledge_scope.py` 规范化原语。
 
 ---
 
@@ -432,7 +488,7 @@ web_fetch 返回 → #3(内层,先执行) 中和:
   `neutralize_untrusted_tags` 保证两条路径行为一致（同样的标签、同样的转义规则）。
 - **必须排在第 2 位预算中间件的内侧**（#2 外层先装配）：先中和原始输出、再由预算截断/外化。
   这是本组中间件最典型的"顺序即正确性"案例——外化文件的字节内容取决于谁先动手。
-- 与第 7 位 Dangling 无直接交互（一个管内容可信、一个管结构配对），但同处共享基座、顺序由
+- 与第 8 位 Dangling 无直接交互（一个管内容可信、一个管结构配对），但同处共享基座、顺序由
   `deerflow.extensions.ordering` 钉死。
 
 ### 源码阅读指引
@@ -443,7 +499,62 @@ web_fetch 返回 → #3(内层,先执行) 中和:
 
 ---
 
-## 4. DanglingToolCallMiddleware（链上第 7 位）
+## 3′. PiiRedactionMiddleware（链上第 4 位，Layer‑1 最内层，可选）
+
+**源码**：`agents/middlewares/pii_redaction_middleware.py`（issue #3190）；配置
+`config/pii_redaction_config.py`。默认**关闭**，由 `pii_redaction.enabled` 开启（开启时必须提供部署级
+`token_secret`）。
+
+### 它解决什么问题
+
+第 1、3 位做的是**结构性**中和（把 `<system-reminder>` 之类标签转义），但都不看**内容里有没有 PII**：
+用户消息可能带邮箱/手机号/身份证号/银行卡号/密钥，远程抓回的网页也可能带这些。若原样进模型上下文
+（并被写进 checkpoint、压缩、投进记忆队列），PII 就散落到了模型调用、trace 与持久化里。本中间件把
+**两个不可信入口**——真实用户消息与远程内容工具结果——里的 PII 改写成**不可逆、值派生**的占位符，
+把"内容级"的脱敏补齐到结构级中和之外。
+
+### 钩子与执行时机
+
+- **`wrap_model_call`（用户消息侧，request-scoped）**：只改"发给模型这一份"的真实用户消息；thread
+  state 里保留原文（UI 仍显示原始消息），每次模型调用重新脱敏。占位符是值派生（对原始值的 128 位
+  HMAC），所以**同一个原始值永远渲染成同一个 token**——跨轮、压缩、入队与下游内容签名去重中身份保持
+  稳定，且不存映射表（离线也无法反推）。
+- **`wrap_tool_call`（工具结果侧，tool boundary）**：对远程内容工具结果脱敏，范围与第 3 位
+  `ToolResultSanitizationMiddleware` **共用同一套 allowlist**（first-party web 工具按名、MCP 工具按
+  `deerflow_mcp` tag），保证"先脱敏、后进模型上下文"。
+- **装配为 Layer‑1 最内层**：它列在 `outer_wrappers` 末尾（在 InputSanitization/KnowledgeScope/
+  ToolOutputBudget/ToolResultSanitization 之后）。这样工具结果是**先脱敏**、再被第 3 位中和标签、
+  再被第 2 位外化/截断——**外化到磁盘的副本里是已脱敏文本**，不会把 PII 落盘；用户消息则是在其它
+  请求改写之后才轮到它。
+- **不只看模型调用**：compaction 输入、摘要、标题输入、入队记忆载荷、DurableContext 重注入的
+  `summary_text` 都经共享入口 `redact_text` 走同一配置策略（由 Summarization/Title/DurableContext/
+  Memory 中间件调用）。子代理经 `build_subagent_runtime_middlewares` 复用同一基座，因此同样覆盖。
+
+### 内部实现逻辑要点
+
+- **v1 是确定性-only**：只用固定正则检测器，不做模型调用、不新增依赖；对格式本身带校验和的标识符做
+  校验（银行卡 Luhn、CN 居民身份证/CPF mod-11）。
+- **检测器顺序被回归测试钉死**：`email → api_key → national_id → credit_card → phone`。带校验和的
+  national_id 排在 credit_card **之前**——18 位居民身份证若也过 Luhn，绝不能被当成卡号吞掉；带明确
+  前缀/格式的（email、api_key）先改写；phone 最后，只看前面强规则没认领的数字。
+- **fail-open**：任何一步异常都放行原始内容（与第 1/2/3 位同一风格——脱敏是增强，不当单点故障）。
+
+### 与邻居的关系
+
+- **与第 1 位 InputSanitization / 第 3 位 ToolResultSanitization 正交**：那两位做结构级中和（按标签名），
+  本中间件做内容级脱敏（按值的形态）——同一入口、两条互补的防线。
+- **在第 3 位内侧、第 2 位外侧**：外化落盘的字节因此是脱敏后的文本，避免"预算把 PII 存起来"。
+- **覆盖记忆入队**：`redact_queued_messages` 把同一策略施加到投给记忆后端的抽取载荷上（#5577 后续切片）。
+
+### 源码阅读指引
+
+`pii_redaction_middleware.py`：顶部 docstring（scope model 三条 + 检测器顺序）→ 检测器常量与
+`redact_text`（共享入口）→ `wrap_model_call`（用户消息侧，值派生占位符）→ `wrap_tool_call`
+（远程结果侧，复用 `_REMOTE_CONTENT_TOOL_NAMES`）→ `_apply`/fail-open 边界。配置：`config/pii_redaction_config.py`。
+
+---
+
+## 4. DanglingToolCallMiddleware（链上第 8 位）
 
 ### 它解决什么问题
 
@@ -469,7 +580,7 @@ Markdown payload，恢复指引必须短，否则合成消息把大块内容回�
 
 ### 钩子与执行时机
 
-- 链上第 7 位（`_build_runtime_middlewares` 的 tail 首位，`include_dangling_tool_call_patch=True`
+- 链上第 8 位（`_build_runtime_middlewares` 的 tail 首位，`include_dangling_tool_call_patch=True`
   时加入；lead 基座开启）。**只有 `wrap_model_call` / `awrap_model_call`**。
 - **只 per-request 修改**：补丁只进 `request.override(messages=...)`，checkpoint state 原封不动。
 - **刻意用 `wrap_model_call` 而不是 `before_model` + `add_messages` reducer**：补丁必须插在**每个
@@ -547,11 +658,11 @@ allow_nan=False)`（NaN 会抛/产生非法 JSON）；字符串必须是可解�
 
 ### 与邻居的关系
 
-- 四个中间件里它**最贴近模型**：第 1 位先框好用户文本、第 2 位先截完历史巨文，第 7 位才做结构
+- 四个中间件里它**最贴近模型**：第 1 位先框好用户文本、第 2 位先截完历史巨文，第 8 位才做结构
   配对——它注入的合成 ToolMessage 是**由构造保证短小且规范**的（错误文案 ≤500 字符、name 必填、
   id 必填），不会触发任何外层（已经执行完预处理的）预算扫描，也天然满足严格 provider 的配对校验。
-- **与紧随其后的 LLMErrorHandlingMiddleware（第 8 位）分工**：Dangling 消灭的是"请求形状 400"
-  这一类调用前故障；真到了 provider 调用阶段的失败才归第 8 位归一化。两者叠加后，消息结构问题
+- **与紧随其后的 LLMErrorHandlingMiddleware（第 9 位）分工**：Dangling 消灭的是"请求形状 400"
+  这一类调用前故障；真到了 provider 调用阶段的失败才归第 9 位归一化。两者叠加后，消息结构问题
   几乎不会漏到错误处理层。
 - **与 `tool_call_metadata.py` 的配合（见辅助模块）**：别的中间件**故意**砍掉 tool_calls 时必须
   同步 raw payload 与 `finish_reason`，否则砍完的消息在下一轮会被本中间件当成悬挂调用、注入
@@ -613,9 +724,9 @@ tool_calls 的中间件用（消费者：ClarificationMiddleware 丢弃同批 si
 
 ---
 
-## 附：四个中间件一页速查
+## 附：四个核心中间件一页速查
 
-| | InputSanitization (#1) | ToolOutputBudget (#2) | ToolResultSanitization (#3) | DanglingToolCall (#7) |
+| | InputSanitization (#1) | ToolOutputBudget (#2) | ToolResultSanitization (#3) | DanglingToolCall (#8) |
 |---|---|---|---|---|
 | 侧翼 | 模型入站 | 工具结果 + 模型入站 | 工具结果 | 模型入站（最内） |
 | 持久化 | 否（per-request） | 工具侧是（落 checkpoint），模型侧否 | 是（净化后落 checkpoint） | 否（per-request） |

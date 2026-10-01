@@ -1,4 +1,4 @@
-# 文件安全与停滞守卫：ReadBeforeWrite × ToolProgress（链位 11、12）
+# 文件安全与停滞守卫：ReadBeforeWrite × ToolProgress（链位 13、14）
 
 > 本篇拆解链上**相邻的两个可选中间件**：`ReadBeforeWriteMiddleware`（**文件写入门禁/版本门**，issue #3857）防「**盲写**」（基于过期内容改文件、破坏正确性）；`ToolProgressMiddleware`（**工具结果质量守卫/停滞状态机**，RFC #3177）防「**停滞**」（有输出但没新信息、烧 token 空转）。一个管文件一致性，一个管投入产出；都长在「工具调用」这条垂直切面上，共享同一套 `deerflow_tool_meta` 元数据语言，所以放在一起讲。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与[目录索引](README.md)。
@@ -7,8 +7,8 @@
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 11 | `ReadBeforeWriteMiddleware` | 写入门：读过的版本哈希匹配才放行写 | `wrap_tool_call` | `read_before_write.enabled`（默认开） |
-| 12 | `ToolProgressMiddleware` | (thread,tool) 停滞状态机：warn → block | `wrap_tool_call` + `wrap_model_call` + `before_agent` | `tool_progress.enabled`（默认关） |
+| 13 | `ReadBeforeWriteMiddleware` | 写入门：读过的版本哈希匹配才放行写 | `wrap_tool_call` | `read_before_write.enabled`（默认开） |
+| 14 | `ToolProgressMiddleware` | (thread,tool) 停滞状态机：warn → block | `wrap_tool_call` + `wrap_model_call` + `before_agent` | `tool_progress.enabled`（默认关） |
 
 两个主角共享 `deerflow_tool_meta`（`middlewares/tool_result_meta.py`）——ToolProgress 能读懂结果质量，前提是每个结果都带结构化元数据。
 
@@ -19,14 +19,14 @@
 DeerFlow 的全部工具调用都会自外向内穿过一条**严格排序**的中间件链(顺序即正确性)。
 `wrap_tool_call` 方向:装配列表第一个 = 最外层。本文两个主角位于运行时基础链
 (shared runtime base,`tool_error_handling_middleware.py::_build_runtime_middlewares`)的
-tail 段(位置标号沿用 AGENTS.md 的 11/12):
+tail 段(位置标号沿用 AGENTS.md 的 13/14):
 
 ```
 模型 tool_calls → 逐层穿过 wrap_tool_call(外 → 内):
-  ToolReceiptMiddleware(13,receipts 记账,最外层) → Guardrail(9) → SandboxAudit(10)
-  → ReadBeforeWriteMiddleware(11 ← 本文主角①:版本检查,可拦截)
-  → ToolProgressMiddleware(12 ← 本文主角②:可拦截,执行后读 meta)
-  → ToolErrorHandlingMiddleware(13:异常→错误 ToolMessage + stamp meta)
+  ToolReceiptMiddleware(15,receipts 记账,最外层) → ArtifactResolution(10) → Guardrail(11) → SandboxAudit(12)
+  → ReadBeforeWriteMiddleware(13 ← 本文主角①:版本检查,可拦截)
+  → ToolProgressMiddleware(14 ← 本文主角②:可拦截,执行后读 meta)
+  → ToolErrorHandlingMiddleware(15:异常→错误 ToolMessage + stamp meta)
   → 实际工具(read_file / write_file / str_replace / web_search / task …)
 ```
 
@@ -35,10 +35,10 @@ tail 段(位置标号沿用 AGENTS.md 的 11/12):
 ```python
 tail.append(SandboxAuditMiddleware())
 if app_config.read_before_write.enabled:      # 默认开
-    tail.append(ReadBeforeWriteMiddleware())  # 11
+    tail.append(ReadBeforeWriteMiddleware())  # 13
 if app_config.tool_progress.enabled:          # 默认关
-    tail.append(ToolProgressMiddleware.from_config(...))  # 12
-tail.append(ToolErrorHandlingMiddleware(...))             # 13,最内
+    tail.append(ToolProgressMiddleware.from_config(...))  # 14
+tail.append(ToolErrorHandlingMiddleware(...))             # 15,最内
 ```
 
 两个主角都是**可选**中间件:`read_before_write.enabled` 默认 `True`(影响文件正确性,默认
@@ -70,7 +70,7 @@ meta 的**生产地是内层 ToolErrorHandling**(每个结果返回时 `normaliz
 
 ---
 
-## 1. ReadBeforeWriteMiddleware:最外层写门(链第 11 位)
+## 1. ReadBeforeWriteMiddleware:最外层写门(链第 13 位)
 
 ### 1.1 它解决什么问题:盲写
 
@@ -97,7 +97,7 @@ _GATED_WRITE_TOOLS = frozenset({"write_file", "str_replace"})
   - `read_file` 命中 → 先让内层执行读,返回后 `_attach_read_mark` 给结果盖读标记;
   - `write_file` / `str_replace` 命中 → 先做 `_check_write_gate` 版本检查,被拦直接短路
     返回,放行才调用内层 handler。
-- 链位置 11 = 坐在 ToolProgress(12)/ToolErrorHandling(13) **外层**。含义见 §1.6:
+- 链位置 13 = 坐在 ToolProgress(14)/ToolErrorHandling(15) **外层**。含义见 §1.6:
   被拦的写**根本不进入内层**,连 ToolProgress 的槽都不占。
 
 ### 1.3 内部实现:mark 的存与验
@@ -194,9 +194,12 @@ def _check_write_gate(request) -> ToolMessage | None:
 
 ### 1.6 与邻居的关系
 
-- **在 ToolProgress(12) / ToolErrorHandling(13) 外层**,这是位置上的核心设计:被拦的写
+- **在 ToolProgress(14) / ToolErrorHandling(15) 外层**,这是位置上的核心设计:被拦的写
   **直接返回、根本不调用内层 handler**,所以 ToolProgress 的 `wrap_tool_call` 不会为这次
   调用执行——**一次"合理拒绝"不消耗 ToolProgress 的停滞计数,也不会被误判为工具故障**。
+- **ArtifactResolution(10) 在它外层**:artifact 句柄先被解析成真实引用(路径/URL/任务 id),门禁检查的才是
+  **真实目标路径**而非句柄——"写某个句柄所指文件"这类参数敏感判定必须发生在句柄解析之后(ordering.py 强校验
+  `ArtifactResolution` outer of `ReadBeforeWrite`)。
 - 既然短路绕过了内层 ToolErrorHandling 的 `normalize_tool_result`,RBW 在自己产的拦截
   ToolMessage 上**主动 `normalize_tool_result` 盖 `deerflow_tool_meta`**。为什么必须盖:
   最外层 ToolReceipt 与其它消费者依赖 meta 记账/分类;内容以 `Error:` 开头会被归一化为
@@ -236,7 +239,7 @@ def _check_write_gate(request) -> ToolMessage | None:
 
 ---
 
-## 2. ToolProgressMiddleware:结果质量状态机(链第 12 位)
+## 2. ToolProgressMiddleware:结果质量状态机(链第 14 位)
 
 ### 2.1 它解决什么问题:停滞 ≠ 死循环
 
@@ -431,10 +434,10 @@ else:
 
 ### 2.7 邻居与链内互动
 
-- **ToolErrorHandling(13) 在它内层**:异常被转成错误 ToolMessage 并 stamp meta(异常路径
+- **ToolErrorHandling(15) 在它内层**:异常被转成错误 ToolMessage 并 stamp meta(异常路径
   用 `stamp_exception_meta`,覆盖工具自带 stamp,因为"异常分类比工具自己的 stamp 更权威")
   后,ToolProgress 才能读到结构化的分类。这是它必须坐在 TEH 外层的唯一原因。
-- **ReadBeforeWrite(11) 在它外层**:被 RBW 拦下的写直接短路,**根本到不了 ToolProgress 的
+- **ReadBeforeWrite(13) 在它外层**:被 RBW 拦下的写直接短路,**根本到不了 ToolProgress 的
   wrap**——合理拒绝不占停滞槽,不会被累计成"工具老失败"。RBW 自 stamp 的
   `recoverable_by_model=True` meta 也保证即使进入分类路径也走 WARNED 而非硬封。
 - **ToolReceipt(最外层)**:ToolProgress 自产的 `[TOOL_BLOCKED]` 消息带完整 meta,receipts
@@ -485,15 +488,15 @@ else:
 
 ```
 ① 模型想改文件 F(没读过当前版)
-     RBW(11):拦,error ToolMessage + meta(unknown/可恢复)   【正确性门:版本不对】
-     → 模型 read_file F → RBW 盖 mark → 再写 → RBW 放行 → TP(12) 正常计数
+     RBW(13):拦,error ToolMessage + meta(unknown/可恢复)   【正确性门:版本不对】
+     → 模型 read_file F → RBW 盖 mark → 再写 → RBW 放行 → TP(14) 正常计数
 ② 反复搜没结果的话题(每次都换了词但都 no_results)
-     TP(12):第 3 次 WARNED + hint;第 5 次仍 recoverable → 停在 WARNED 重注入,不硬封
+     TP(14):第 3 次 WARNED + hint;第 5 次仍 recoverable → 停在 WARNED 重注入,不硬封
              —— 换词重试是合法的,封死会扼杀模型自救
 ③ 对同一 URL 连续抓取(内容一模一样)
-     TP(12):success 但 Jaccard 判重 → WARNED"返回重复结果"
+     TP(14):success 但 Jaccard 判重 → WARNED"返回重复结果"
 ④ 反复调一个密钥失效的工具
-     TP(12):auth/stop 首现即 BLOCKED,后续调用直接 [TOOL_BLOCKED],零执行
+     TP(14):auth/stop 首现即 BLOCKED,后续调用直接 [TOOL_BLOCKED],零执行
 ```
 
 **一句话总结**:ReadBeforeWrite 保证"**要写的文件,模型真的看过当前版**"(正确性,宁可拦);

@@ -1,6 +1,6 @@
 # 第 8 章 Sub-Agent 总览与执行引擎
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10,v2.2.0-dev)编写
 
 ## 8.0 本章导览
 
@@ -66,11 +66,13 @@ async def task_tool(
     *,
     acceptance_criteria: list[str] | None = None,  # 验收清单(§8.9.3)
     description: str = "",            # 3-5 词短标签,仅用于日志/前端进度卡
+    context_mode: Literal["isolated", "snapshot"] = "isolated",  # 上下文模式:仅委派 prompt / 附父对话快照(§8.10.4)
 ) -> str | Command
 ```
 
 - `description` 只是展示标签,**执行从不依赖它**;provider 没传时生命周期展示回退到 `prompt`。
 - `acceptance_criteria` 是"模型提供的不可信数据"(最终可被用户影响),在 `_build_initial_state` 里被追加到子代理的 task `HumanMessage` 上(经过 `InputSanitizationMiddleware` 的中和与边界化),**绝不进 SystemMessage 通道**(§8.9)。
+- `context_mode` 默认 `isolated`(只给委派 prompt);选 `snapshot` 时在委派那一刻冻结一份父对话快照(`ParentContextSnapshot`,§8.10.4),随任务注入,提升输入 token 成本但不与父后续回合同步。非法取值在真正启动执行前即以 `failed` 拒绝。
 - 返回类型是 LangGraph `Command`:更新父线程消息流,插入一条结构化 `ToolMessage`(见 §8.2.4)。
 
 ### 8.2.2 前置校验
@@ -82,7 +84,7 @@ async def task_tool(
 3. **类型解析**:`get_subagent_config(subagent_type)` 找不到,或名字不在可用目录里时,报错并**列出全部可用类型**。
 4. **技能白名单合并**:若父代理有 `available_skills`,子代理配置里的 `skills` 要取父策略与子配置的**交集**(`_merge_skill_allowlists`),防止子代理看到父代理都看不到的技能。
 
-工具装配时,子代理**拿不到 `task`**(`subagent_enabled=False`,防递归嵌套),也拿不到上传工具(`include_upload_tool=False`——子代理有独立 ThreadState,`runtime.state["uploaded_files"]` 不存在,当前 run 的文件排除逻辑不成立)。工具组继承父代理的 `tool_groups`,模型名经 `resolve_subagent_model_name` 解析(`inherit` → 用父模型;无父模型时回退到配置的第一个模型)。
+工具装配时,子代理**拿不到 `task`**(`subagent_enabled=False`,防递归嵌套)。上传工具则**条件性**给出:当父 runtime state 的 `uploaded_files` 是一个完整、已校验的列表(每项 `filename` 为净名、无路径分隔)时,`upload_state_available=True`,`include_upload_tool` 随之打开——子代理因而拿到 `list_uploaded_files`,可像父代理一样排除当前 run 的文件、只发现历史上传;非标准调用方(没有该 state 通道)保持 fail-closed,不含上传工具,以免把当前上传误判成历史。工具组继承父代理的 `tool_groups`,模型名经 `resolve_subagent_model_name` 解析(`inherit` → 用父模型;无父模型时回退到配置的第一个模型)。
 
 ### 8.2.3 委派路径全景
 
@@ -129,7 +131,7 @@ usage 快照由子代理内部的 `SubagentTokenCollector` 在每个 LLM 响应�
 
 `task` 是同步语义,但被调用时父代理很可能正跑在某个事件循环里(Gateway/嵌入式都在 async 环境),直接 `await` 会把父循环阻塞到子代理跑完(默认最长 30 分钟)。早期方案是"每次执行起一个独立线程 + 短命事件循环",代价是共享的异步客户端(HTTP/SQL 连接池等)被绑定到会被立刻关闭的短命 loop 上,反复重建。
 
-新实现(commit 2672e209)采用**一个进程级、长期存活、跑在专用 daemon 线程上的事件循环**:
+新实现(commit 11b339d6)采用**一个进程级、长期存活、跑在专用 daemon 线程上的事件循环**:
 
 ```python
 # subagents/executor.py
@@ -158,7 +160,7 @@ loop 边界有双向流量:
 
 - **父 → 子**:上述 `run_coroutine_threadsafe` 提交执行。
 - **子 → 父**:两个刻意保留的窄通道。
-  1. **loop 检测审计记录**:`task_tool` 捕获父 loop,构造 `_ParentLoopMiddlewareRecorderProxy` 交给 `SubagentExecutor`;子代理 loop 上的 loop-detection 中间件通过该代理把日志 append `call_soon_threadsafe` 回父 loop 上的 `RunJournal`,避免从子 loop 直接调父 run 的事件存储。工具返回前 `aclose()` 代理:先围栏(fence)迟到的子事件,再让已接受的 append 全部落地。
+  1. **中间件审计记录代理**:`task_tool` 捕获父 loop,构造 `_ParentLoopMiddlewareRecorderProxy` 交给 `SubagentExecutor`;它同时绑到三个 recorder 上下文键——**loop-detection、tool-promotion、tool-progress**——子代理 loop 上的这些中间件通过代理把事件 `call_soon_threadsafe` 回父 loop 上的 `RunJournal`,避免从子 loop 直接调父 run 的事件存储(代理还会原子地对本次子执行去重 tool-promotion 声明)。工具返回前 `aclose()` 代理:先围栏(fence)迟到的子事件,再让已接受的 append 全部落地。
   2. **终态 usage 报告(延迟清理路径)**:当轮询异常退出、需要把清理任务钉在持久 loop 上(`run_on_isolated_subagent_loop()`)时,`_deliver_final_usage_report` 把最终 usage 记录**送回父 loop** 上的 `RunJournal`(`call_soon_threadsafe`)。方向不可反:journal 的累加器是无锁读改写字段,`get_completion_data()` 会遍历 `_tokens_by_model`,跨线程写会丢 token 更新或破坏迭代。若捕获父 loop 时它已关闭(`asyncio.run` 同步收尾),报告按设计丢弃并记 info 日志——run 已持久化完成数据,计数器无人再读。
 
 ### 8.3.4 为什么清理任务必须钉在持久 loop
@@ -199,7 +201,7 @@ async def _aexecute(self, task, result_holder=None) -> SubagentResult:
 `_aexecute_admitted` 是真正的执行体,要点:
 
 - **执行上下文**:`sandbox_lease_owner_id = f"subagent:{result.task_id}"`,连同 `run_id`、`user_id/user_role/oauth_*`、`authz_attributes`、`is_internal`、`channel_user_id`、扩展 task store 一起写进传给 `agent.astream(..., context=...)` 的 runtime context,并打 `context["is_subagent"] = True`——下游中间件/沙箱据此区分主代理与子代理;
-- **图装配**:`_create_agent()` 用 `create_agent(state_schema=ThreadState, checkpointer=False)`,中间件走 `build_subagent_runtime_middlewares`(§8.10.1);`run_config` 的 `recursion_limit = config.max_turns`,显式回调只放子代理专属的 `SubagentTokenCollector` + tracing 回调——**不放进任何 checkpoint 坐标键**(`thread_id/checkpoint_ns/...`),让 LangGraph 从拷贝来的父 ContextVar 继承坐标,保持子图命名空间(§8.10.4);
+- **图装配**:`_create_agent()` 用 `create_agent(state_schema=ThreadState, checkpointer=False)`,中间件走 `build_subagent_runtime_middlewares`(§8.10.1);`run_config` 的 `recursion_limit` 不是直接传 `config.max_turns`,而是交给 `turn_budget.resolve_recursion_limit(max_turns, middlewares)` 换算(见 §8.4.5),显式回调只放子代理专属的 `SubagentTokenCollector` + tracing 回调——**不放进任何 checkpoint 坐标键**(`thread_id/checkpoint_ns/...`),让 LangGraph 从拷贝来的父 ContextVar 继承坐标,保持子图命名空间(§8.10.4);
 - **流式主循环**:`async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values")`,每个 chunk 做四件事——(a) 先保留 `final_state = chunk`(让在途工具结果先于协作式取消被收割);(b) `update_tool_receipts` / `update_bash_executions` 累积验收证据;(c) 检查 `result.cancel_event` 实现**协作式取消**;(d) `capture_new_step_messages` 增量捕获步骤消息(见下);
 - **终态判定**:流结束后扫描最后一条 AI 消息——带 `deerflow_error_fallback` 标记(LLMErrorHandlingMiddleware 产物)则映射为 `FAILED`,否则 `_extract_final_result` 抽取结果文本(找不到可用文本返回哨兵 `"No response generated"`)。
 
@@ -219,9 +221,11 @@ async def _aexecute(self, task, result_holder=None) -> SubagentResult:
 
 | 轴 | 机制 | 触发后 |
 |----|------|--------|
-| 回合轴 | `run_config.recursion_limit = max_turns`,耗尽抛 `GraphRecursionError`,`_aexecute` 专捕 | 有可用部分结果 → `completed + turn_capped`;否则 `failed + turn_capped` |
+| 回合轴 | `run_config.recursion_limit = resolve_recursion_limit(max_turns, 装配链)`(把 max_turns 换算成链的逐步超步预算,见下),耗尽抛 `GraphRecursionError`,`_aexecute` 专捕 | 有可用部分结果 → `completed + turn_capped`;否则 `failed + turn_capped` |
 | token 轴 | `TokenBudgetMiddleware`(默认 `max_tokens` 与 `summarization.enabled` 耦合:开 1M / 关 2M,warn 0.7,硬停 1.0;用户设值永远优先) | 硬停**不抛异常**:剥掉在途回合的 tool_calls、强制 `finish_reason="stop"`,自然完成 → `completed + token_capped` |
 | 循环轴 | `LoopDetectionMiddleware`:重复相同工具调用集、或某工具类型高频变化参数 | 同样剥 tool_calls 强制收尾 → `+ loop_capped` |
+
+回合轴的换算值得单独说清:`max_turns` 是运营者语义("这个代理能想几次、做几次"),而 LangGraph 的 `recursion_limit` 数的是**图节点超步**——`create_agent` 把每个中间件生命周期钩子编译成独立节点(`{middleware}.before_model` 等),所以一个回合要花"before_model 节点 + `model` + after_model 节点 + `tools`",外加每次调用一次的 `before_agent`/`after_agent`。直接把 `max_turns` 当 `recursion_limit` 会按链深除预算(子代理链编译出七到八个循环节点,`max_turns=150` 只剩约十八个回合)。`subagents/turn_budget.py::resolve_recursion_limit` 从**实际装配出的链**推导乘数:`max(1, max_turns) × 每回合节点数 + 每次调用的节点数`,并让 `find_jumping_hooks` 对声明 `can_jump_to` 的钩子告警(此时结果是下界而非精确预算;今天子代理链没有这种钩子)。`_recursion_limit` 在 `_create_agent` 装配后一次性解析(executor.py)。
 
 `_aexecute` 通过 `hasattr(m, "consume_stop_reason")` **鸭子类型**收集所有带该方法的中间件(每个按 run_id 提供一次性取值),取第一个非空原因。加性字段意味着:**被 cap 但有可用输出的 run 保持 `completed`,部分成果随 `result` 存活**,父代理能区分"正常收工"与"被预算掐断",而无需解析文本。终态 ToolMessage 的 `subagent_stop_reason` 让前端/日志看到同一原因。capped 文本标注示例:"Task Succeeded (capped: token budget). Result: …"。
 
@@ -285,13 +289,16 @@ class SubagentResult:
     result: str | None           # 完成后的最终文本
     error: str | None
     stop_reason: str | None      # token_capped/turn_capped/loop_capped(加性)
+    ai_messages: list | None     # 本次执行生成的完整 AI 消息(§8.6:喂给 cited_source_artifact 的 source_messages)
     token_usage_records: list    # collector 快照
+    usage_reported: bool         # 终态 usage 是否已回送父 loop(§8.3.3 延迟清理路径)
+    admission_failure: bool      # 是否因容量准入拒绝/超时而终态化(§8.4.1)
     tool_receipts: list | None   # 收割的子代理工具收据(RFC #4651 PR2)
     bash_executions: list | None # 验收用 bash 执行证据(RFC #4651 PR4)
     cancel_event: threading.Event
 ```
 
-它的核心不变量由 `try_set_terminal(status, ...)` 保证:**终态只能设置一次**。后台超时/取消与执行 worker 可能竞争同一个 holder,第一个到达的终态转换赢,迟到的终态写不得改写状态或载荷——所有读写都在 `_state_lock`(threading.Lock)下进行。`update_token_usage_records` / `update_tool_receipts` / `update_bash_executions` 则是运行中发布方法,只在非终态时生效(终态后拒绝再写)。
+它的核心不变量由 `try_set_terminal(status, ...)` 保证:**终态只能设置一次**。后台超时/取消与执行 worker 可能竞争同一个 holder,第一个到达的终态转换赢,迟到的终态写不得改写状态或载荷——所有读写都在 `_state_lock`(threading.Lock)下进行。`update_token_usage_records` / `update_tool_receipts` / `update_bash_executions` 则是运行中发布方法,只在非终态时生效(终态后拒绝再写)。终态写回时,`task_tool` 把 `result.ai_messages` 作为 `source_messages` 传给 `cited_source_artifact`(task_tool.py),让委派结果的引用来源可携带子代理生成的 AI 消息。
 
 > 命名提醒:`SubagentResult.task_id` 就是 execute_async 返回的 `execution_id`(全量 uuid)。sync 路径 `_aexecute` 内部创建的 result 用 `str(uuid.uuid4())[:8]` 短 id,只活在同步调用栈内,不进注册表。
 
@@ -346,9 +353,9 @@ class SubagentResult:
 1. **内建**:`BUILTIN_SUBAGENTS`(general-purpose、bash);
 2. **`config.yaml custom_agents`**(operator 控制的本地自定义);
 3. **管理员托管定义**:`ManagedSubagentDefinition`(经 `agent_storage.backend` 持久化,与 Custom Agent 定义同一存储后端;按 1 秒签名 TTL 缓存);
-4. **`subagents.agents.<name>` 逐代理覆盖**:timeout、max_turns、model、skills——只显式覆盖;全局默认不覆盖自定义代理自己的值。
+4. **`subagents.agents.<name>` 逐代理覆盖**:timeout、max_turns、model、skills、token_budget、**prompt_overlay**——只显式覆盖;全局默认不覆盖自定义代理自己的值。
 
-覆盖的优先级细节:timeout/max_turns 为"逐代理覆盖 > 全局默认(仅内建) > 配置自身值";model/skills 只有逐代理覆盖。名字冲突时,**内建与 config.yaml 定义优先**,同名托管定义"仍持久化(Settings UI 可见)但被排除出运行时"。`list_subagents` / `get_subagent_names` 支持 `allowed_subagents` 白名单过滤;Custom Agent 的 `allowed_subagents` 在装配时被**快照进 run metadata**,提示发现与 `task` 执行两侧都用同一快照过滤——工具内部绝不重读可变的代理配置来推调用方策略(防 TOCTOU)。
+覆盖的优先级细节:timeout/max_turns 为"逐代理覆盖 > 全局默认(仅内建) > 配置自身值";model/skills/prompt_overlay 只有逐代理覆盖。`prompt_overlay`(`config/prompt_overlay.py::PromptOverlay`)是运营者所有的**字面量**提示扩展,包在这个子代理系统提示的外围。名字冲突时,**内建与 config.yaml 定义优先**,同名托管定义"仍持久化(Settings UI 可见)但被排除出运行时"。`list_subagents` / `get_subagent_names` 支持 `allowed_subagents` 白名单过滤;Custom Agent 的 `allowed_subagents` 在装配时被**快照进 run metadata**,提示发现与 `task` 执行两侧都用同一快照过滤——工具内部绝不重读可变的代理配置来推调用方策略(防 TOCTOU)。
 
 ### 8.7.3 直接调用方的 SubagentRuntime
 
@@ -385,7 +392,7 @@ class DelegationEntry(TypedDict):
 - 扫所有 `AIMessage.tool_calls`,凡名字是 `task` 的:以 `tool_call_id` 为 id 建 `in_progress` 条目(描述取 `description` 否则 `prompt`,截 200 字符);
 - 再扫所有 `ToolMessage`,按 `tool_call_id` 配对,从 `additional_kwargs` 的 `subagent_status` 等结构化字段读终态并回填(status、stop_reason、receipt/acceptance verdict、result_brief+sha256+result_ref)。
 
-归并器 `merge_delegations`(ThreadState reducer):同 id 以最新版本替换且保持首见顺序;`in_progress` 可被升级,**终态永不被非终态降级**;台账上限 50 条。这保证断点续跑(checkpoint 恢复)后父代理仍看得到历史委派。
+归并器 `merge_delegations`(ThreadState reducer):以 **`(run_id, tool_call_id)` 为键**——同一键以最新版本替换且保持首见顺序,provider 的 `tool_call_id` 在同一线程的后续 run 里可以重复,故键里带上 `run_id` 才不会把不同 run 的同名调用互相覆盖(缺 `run_id` 的遗留更新仍退化为更新最近一条同 id 条目);`in_progress` 可被升级,**终态永不被非终态降级**;台账上限 50 条。这保证断点续跑(checkpoint 恢复)后父代理仍看得到历史委派。
 
 持久化的时机与边界(durable-context 捕获):每次 `before_agent` 把**当前 run 边界内新产生/变化的条目**追加进 state——靠 runtime context 里的 `run_id` 与新消息边界识别"哪些是这次 run 的委派"(Gateway resume 路径不允许追加新 HumanMessage,worker 把 run 前 checkpoint 的消息 id 集暴露进 context 作为边界)。**历史 run 的委派不消耗新 run 的预算**(§8.8.4)。
 
@@ -443,6 +450,7 @@ RFC #4651 的核心立场,直接写进了 `task` 工具 docstring 的第一句:
 父代理挂 `acceptance_criteria` 时,子代理完成分支(经 `asyncio.to_thread` 卸载、失败隔离)对**可判定叶子**做代码级检查:
 
 - `file:<path> exists` / `non-empty`:经与 `ReadBeforeWriteMiddleware` 同源的 `read_current_file_content`,**限定共享线程工作区**(`workspace_path`/`outputs_path`,虚拟 `/mnt/user-data/...` 前缀与工作区相对写法先归一)。读用沙箱原生虚拟路径;大小先定界(本地 `os.stat`;远端在全新 `env -i` shell 里做只元数据的 stat/realpath 探针——被污染的持久 shell 会话状态(函数/别名/PATH/locale)无法左右它,`stat` 不开内容所以 FIFO 阻塞不了父代理,必须是常规非符号链接文件,realpath 必须落在挂载根的 realpath 之下,末段符号链接直接拒绝);
+- `file:<path> json-valid`:显式 UTF-8 JSON **语法**检查,上限 50,000 字节(多读一字节核对完整性;超限、截断读、解析器资源上限一律 UNVERIFIED;拒绝 NaN/Infinity)。只验语法,**不做 schema 或业务校验**;`.json` 文件不会被自动当成此叶子;
 - `file_written:<path>`:存在性 + 读回的类型化声明绑定;
 - `tests_passed:<command>`:必须锚定到**某条具体的已记录 bash 执行**(executor 从流式 chunk 累积进 `bash_executions`,按 `tool_call_id` 归并、有界缓存,摘要压缩旧消息也抹不掉)且状态成功、输出尾带测试汇总形态;命令匹配做 shell 结构解析(操作符分段、可执行名、参数),`echo` 参数里"提了一句"不能锚定;
 - 其余任何措辞:**`checked=False`,渲染 UNVERIFIED,绝不静默通过**。
@@ -459,11 +467,11 @@ RFC #4651 的核心立场,直接写进了 `task` 工具 docstring 的第一句:
 
 ### 8.10.1 中间件链:共享底座 + 子代理专属收尾
 
-`build_subagent_runtime_middlewares`(在 `agents/middlewares/tool_error_handling_middleware.py`)复用主代理共享底座(`_build_runtime_middlewares` 的子集):InputSanitization → ToolOutputBudget → ToolResultSanitization → ThreadData → Sandbox → DanglingToolCallPatch → LLMErrorHandling → Guardrail/Authorization → SandboxAudit → SkillActivation → SkillToolPolicy 等;随后追加子代理专属件:ViewImage(模型支持时)、MCP 路由/延迟工具过滤、`LoopDetectionMiddleware`、`TokenBudgetMiddleware`(按 `agent_name` 解析逐代理 token_budget)、`SubagentDateContextMiddleware`(#4781,一次性注入框架所有的 `<current_date>`,不读记忆配置、不继承主代理冻结对话/午夜生命周期)、`DurableContextMiddleware`(skip_memory_flush=True,§8.10.3)、可选的 summarization 件、最内层 `SystemMessageCoalescingMiddleware`(把多个 SystemMessage 合并成一个领头的——严格 provider 不接受"assistant-first"或重复 system 消息)。**不装** `SubagentLimitMiddleware` 与 lead-only 件——子代理没有 `task`,不需要限额;任务卡也解释过原因。
+`build_subagent_runtime_middlewares`(在 `agents/middlewares/tool_error_handling_middleware.py`)复用主代理共享底座(`_build_runtime_middlewares` 的子集):InputSanitization → **KnowledgeScope**(紧随其后,只暴露 Gateway 准入的执行作用域)→ ToolOutputBudget → ToolResultSanitization → [可选 **PiiRedaction**,`pii_redaction.enabled` 默认关] → ThreadData → Sandbox → DanglingToolCallPatch → LLMErrorHandling → **ArtifactResolution** → Guardrail/Authorization → SandboxAudit → ToolReceipt/ToolErrorHandling → **ArtifactCapture** → SkillActivation → SkillToolPolicy 等;随后追加子代理专属件:ViewImage(模型支持时)、MCP 路由/延迟工具过滤、`LoopDetectionMiddleware`、`TokenBudgetMiddleware`(按 `agent_name` 解析逐代理 token_budget)、`SubagentDateContextMiddleware`(#4781,一次性注入框架所有的 `<current_date>`,不读记忆配置、不继承主代理冻结对话/午夜生命周期)、`DurableContextMiddleware`(skip_memory_flush=True,§8.10.3)、可选的 summarization 件、最内层 `SystemMessageCoalescingMiddleware`(把多个 SystemMessage 合并成一个领头的——严格 provider 不接受"assistant-first"或重复 system 消息)。**不装** `SubagentLimitMiddleware` 与 lead-only 件——子代理没有 `task`,不需要限额;任务卡也解释过原因。
 
 ### 8.10.2 沙箱:共享文件域,独立执行租约
 
-- **共享**:executor 从父 runtime state 接收 `sandbox_state`/`thread_data`,子代理在**同一个线程工作区**里干活(虚拟路径 `/mnt/user-data/{uploads,workspace,outputs}`),验收检查也按这个共享域判 `file:` 叶子;上传不共享(独立 ThreadState 无 `uploaded_files`);
+- **共享**:executor 从父 runtime state 接收 `sandbox_state`/`thread_data`,子代理在**同一个线程工作区**里干活(虚拟路径 `/mnt/user-data/{uploads,workspace,outputs}`),验收检查也按这个共享域判 `file:` 叶子;子代理自身 ThreadState 不持有 `uploaded_files`,但当父 state 的该字段是一个已校验列表时,executor 会收到一份快照并据此开启上传工具(§8.2.2),让子代理能排除当前 run 文件、只发现历史上传;
 - **独立执行租约**(#5128):每个被准入的子代理 run 带任务派生的 `sandbox_lease_owner_id = "subagent:{task_id}"` 与同值 `sandbox_command_scope_id`。沙箱中间件把这次执行保留在**父线程的活动 provider client** 上——一个子代理收尾不能关掉沙箱而兄弟姐妹还在跑;最后一个持有者才做 pending 的 provider 释放。AIO 沙箱下,命令作用域为每个子代理选一条**显式持久 shell 会话**,不同作用域可并发,单子代理内 shell 状态保序。同步沙箱工具体经 `asyncio.to_thread` 卸载时被 shield 并在重复取消间排干,被取消的 worker 既不能重新接纳已释放的 owner,也不能在子代理终态化之后继续跑。中间件做正常释放,`SubagentExecutor` 在 `finally` 里幂等补一次——异常、协作取消、超时展开路径都漏不掉租约或会话。
 
 ### 8.10.3 记忆:不污染父线程的持久记忆
@@ -475,7 +483,7 @@ RFC #4651 的核心立场,直接写进了 `task` 工具 docstring 的第一句:
 - 子代理图**不带 checkpointer**、一次性不续跑(§8.4.3);
 - `run_config` 里故意省略 checkpoint 坐标键,靠拷贝的父 ContextVar 继承**非根子图命名空间**——这是 stream 隔离的契约:子代理的 `values` 快照如果冒充裸根帧发布,SDK 客户端会看到整条线程视图被替换(#4399);根级消费者(文件块批处理、子代理事件持久化、LLM 错误回退检测)忽略带命名空间的帧;
 - 子代理的业务上下文(thread_id 等)走 `runtime.context`,这条路径与坐标继承互不干扰;
-- 初始状态只有一条合并的 SystemMessage(角色提示 + 报告契约 + 技能索引/延迟工具提示)+ 一条 task HumanMessage(+ 验收准则)——**不继承父消息历史**,这正是"上下文隔离收益"的机制来源。
+- 初始状态默认只有一条合并的 SystemMessage(角色提示 + 报告契约 + 技能索引/延迟工具提示)+ 一条 task HumanMessage(+ 验收准则)——**默认 `context_mode="isolated"` 不继承父消息历史**,这正是"上下文隔离收益"的机制来源;但选 `context_mode="snapshot"` 时,委派那一刻会**额外注入一条冻结的父对话快照**:`subagents/context_snapshot.py::ParentContextSnapshot` 把父的保留消息与 `summary_text` 序列化成一条隐藏 `HumanMessage`(`name="parent_context_snapshot"`,不可序列化的历史媒体降级为文本占位),让"需求或失败尝试散落在父对话各处"的委派也能带上背景。快照是**派发时刻的一次性冻结**——父后续回合不同步进来;其中的历史工具调用/收据属于父代理,**不是子代理完成任务的证据**,子代理须用自己的工具核验承重论断。
 
 ### 8.10.5 技能:父身份解析,父策略收敛
 
@@ -502,7 +510,7 @@ subagents:
   token_budget: {...}          # max_tokens 默认与 summarization.enabled 耦合(1M/2M),warn 0.7,硬停 1.0
   custom_agents:               # 自定义类型:name → {description, system_prompt, tools, skills, model, max_turns, timeout_seconds}
     ...
-  agents:                      # 逐代理覆盖:timeout/max_turns/model/skills
+  agents:                      # 逐代理覆盖:timeout / max_turns / model / skills / token_budget / prompt_overlay
     general-purpose: {...}
 subagent_runtime:              # startup-only 进程容量
   max_running: 3               # 并发上限(1-64)
@@ -517,11 +525,13 @@ verification:
 |--------|------|
 | 执行器 / 结果 / 后台注册表 / 隔离 loop | `subagents/executor.py` |
 | 准入控制 | `subagents/capacity.py` |
+| 回合预算换算(max_turns→recursion_limit) | `subagents/turn_budget.py` |
+| 父对话快照(context_mode="snapshot") | `subagents/context_snapshot.py` |
 | 类型注册与解析 | `subagents/registry.py`、`subagents/builtins/`、`persistence/managed_subagents.py` |
 | 线缆契约 | `subagents/status_contract.py`(+`contracts/subagent_status_contract.json`) |
 | 委派台账 | `agents/middlewares/delegation_ledger.py`、`agents/thread_state.py` |
 | 限额中间件 | `agents/middlewares/subagent_limit_middleware.py` |
-| 报告契约 / 验收 | `subagents/report_contract.py`、`subagents/acceptance_checks.py`、`agents/middlewares/receipt_verification.py`、`agents/middlewares/tool_receipt.py` |
+| 报告契约 / 验收 | `subagents/report_contract.py`、`subagents/acceptance_checks.py`、`subagents/batch_acceptance.py`、`agents/middlewares/receipt_verification.py`、`agents/middlewares/tool_receipt.py` |
 | 工具入口 / 批处理 | `tools/builtins/task_tool.py`、`tools/builtins/batch_task_tool.py`、`subagents/batch_service.py` |
 | 子代理中间件装配 | `agents/middlewares/tool_error_handling_middleware.py::build_subagent_runtime_middlewares` |
 | 事件持久化 | `runtime/runs/worker.py::_SubagentEventBuffer`、`subagents/step_events.py` |

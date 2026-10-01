@@ -1,6 +1,6 @@
 # 11 · 记忆更新流水线:捕获 → 队列 → 提取 → 淘汰 → 注入回环
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写。
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10)编写。
 > 配套深文:`../memory-architecture-design.md`(自包含架构设计,含存储格式与并发细节);本章聚焦**代码级流水线**——每个环节在哪个文件、哪一行、按什么规则放行或丢弃,并沿一条记忆的完整旅程把中间件、队列、后端三者如何分工讲透。
 
 ## 0 全景:一条记忆的五站旅程
@@ -13,12 +13,12 @@
   │                                                                    │
   ┌──────────┐   ①捕获      ②队列         ③提取(LLM)      ④闸门+落盘    │
   │ 对话结束  │ → MemoryMiddleware → MemoryUpdateQueue → MemoryUpdater → MemoryStorage
-  │          │    (链 22)      (debounce 30s/背压)   (一次调用六决策)   (scope 闸门/乐观锁)
+  │          │    (链 25)      (debounce 30s/背压)   (一次调用六决策)   (scope 闸门/乐观锁)
   └──────────┘                                                         │
        ▲                                                               ▼
        │  ⑤注入回环                                      memory.json + facts/*.md + FTS5 索引
   ┌──────────┐   读链路(同步、每次模型调用前)                            │
-  │ 下一轮对话 │ ← DynamicContextMiddleware(#14) ← manager.get_context() │
+  │ 下一轮对话 │ ← DynamicContextMiddleware(#17) ← manager.get_context() │
   └──────────┘   冻结快照注入首条用户消息                                 │
                                                                         │
   紧急链:Summarization 压缩前 → memory_flush_hook → add_nowait(bypass)  ─┘
@@ -31,8 +31,8 @@
 
 | 组件 | 文件 | 职责 |
 |---|---|---|
-| `MemoryMiddleware` | `agents/middlewares/memory_middleware.py` | 对话结束后入队(链 22,极薄) |
-| `DynamicContextMiddleware` | `agents/middlewares/dynamic_context_middleware.py` | 读链路注入(链 14) |
+| `MemoryMiddleware` | `agents/middlewares/memory_middleware.py` | 对话结束后入队(链 25,极薄) |
+| `DynamicContextMiddleware` | `agents/middlewares/dynamic_context_middleware.py` | 读链路注入(链 17) |
 | `memory_flush_hook` | `agents/memory/summarization_hook.py` | 摘要压缩前紧急冲刷 |
 | `MemoryManager` 契约 | `agents/memory/manager.py` | 后端中立接口 + 单例工厂 |
 | `DeerMem` 后端 | `agents/memory/backends/deermem/deer_mem.py` | 过滤、队列、抽取、闸门的组装 |
@@ -44,11 +44,11 @@
 
 ---
 
-## 1 MemoryMiddleware(链 22):薄捕获器
+## 1 MemoryMiddleware(链 25):薄捕获器
 
 ### 1.1 挂载点与触发时机
 
-在 lead-agent 的装配函数 `agents/lead_agent/agent.py::build_middlewares()` 里,`MemoryMiddleware` 在所有运行时中间件(1-13)和 lead-only 追加段中**紧跟 `TitleMiddleware` 之后**被 append,在 `agents/middlewares/AGENTS.md` 记载的中间件总表中编号为 **22**(同一张表里读链路的 `DynamicContextMiddleware` 是 14,`SummarizationMiddleware` 是 18——三者的相对位置决定了它们协作的时序)。注释写得很直白:
+在 lead-agent 的装配函数 `agents/lead_agent/agent.py::build_middlewares()` 里,`MemoryMiddleware` 在所有运行时中间件(1-16)和 lead-only 追加段中**紧跟 `TitleMiddleware` 之后**被 append,在 `agents/middlewares/AGENTS.md` 记载的中间件总表中编号为 **25**(同一张表里读链路的 `DynamicContextMiddleware` 是 17,`SummarizationMiddleware` 是 21——三者的相对位置决定了它们协作的时序)。注释写得很直白:
 
 ```
 # TitleMiddleware generates title after first exchange
@@ -101,7 +101,7 @@ async def aafter_agent(self, state, runtime) -> dict | None:  # 异步路径
 
 ### 1.4 tool 模式的特例
 
-`memory.mode: middleware`(默认)时中间件无条件挂载。`mode: tool` 时**默认不挂**(模型自己通过 `memory_search`/`memory_add` 等四个工具决定记什么,`tools.py`);唯一的例外是**后端声明 `backend_requires_passive_writes_in_tool_mode` 为真**时(如 openviking:搜索靠工具、持久写仍依赖对话级抽取),中间件保留,形成"工具搜索 + 被动抽取"混合模式(`agent.py` 597-607 行的条件 append)。注意一个告警分支:`mode: tool` 但 `enabled: false` 会打出 warning——工具都不注册了,模式配置没意义。
+`memory.mode: middleware`(默认)时中间件无条件挂载。`mode: tool` 时**默认不挂**(模型自己通过 `memory_search`/`memory_add` 等四个工具决定记什么,`tools.py`);唯一的例外是**后端声明 `backend_requires_passive_writes_in_tool_mode` 为真**时(如 openviking:搜索靠工具、持久写仍依赖对话级抽取),中间件保留,形成"工具搜索 + 被动抽取"混合模式(`agent.py` 中 `build_middlewares` 的 `requires_passive_writes_in_tool_mode(...)` 条件 append)。注意一个告警分支:`mode: tool` 但 `enabled: false` 会打出 warning——工具都不注册了,模式配置没意义。
 
 ---
 
@@ -143,14 +143,14 @@ def _prepare_update(self, messages):
 
 上传的文件列表是**会话级临时资源**,绝不能进长期记忆。两条防线:
 
-1. **消息块剥离**:`UploadsMiddleware`(链 5,lead-only)会把本轮新上传的文件以 `<current_uploads>...</current_uploads>` 块 prepend 到最后一条用户消息的内容前(`uploads_middleware.py`);`filter_messages_for_memory` 用正则 `_UPLOAD_BLOCK_RE = re.compile(r"<current_uploads>[\s\S]*?</current_uploads>\n*", re.IGNORECASE)` 把整块删掉。若剥离后内容为空(纯上传轮),该 human 与其 AI 回复**整体跳过**——上传动作本身永不入队。
+1. **消息块剥离**:`UploadsMiddleware`(AGENTS 中间件总表编号 6,仅 lead 链挂载)会把本轮新上传的文件以 `<current_uploads>...</current_uploads>` 块 prepend 到最后一条用户消息的内容前(`uploads_middleware.py`);`filter_messages_for_memory` 用正则 `_UPLOAD_BLOCK_RE = re.compile(r"<current_uploads>[\s\S]*?</current_uploads>\n*", re.IGNORECASE)` 把整块删掉。若剥离后内容为空(纯上传轮),该 human 与其 AI 回复**整体跳过**——上传动作本身永不入队。
 2. **提示词禁令**:抽取模板 `memory_update.chat.yaml` 的"不建事实"清单里明确列出**文件上传事件**——就算剥离失败漏了一条,模型也被指示不得把"用户传了 foo.pdf"记成事实。
 
 为什么?上传路径只在当前 run 有效(`list_uploaded_files_tool` 明说"当前 run 上传的文件已列在 `<current_uploads>` 里,不再重复"),写进长期记忆,未来的会话会拿着过期路径去访问不存在的文件。旧版书里这个块叫 `<uploaded_files>` 且逻辑在中间件层;现版本已改为 `<current_uploads>` 并下沉到后端过滤——语义一致,位置和名字都变了。
 
 ### 2.5 有来有回门槛 + 信号检测
 
-过滤后必须**至少各有一条 human 和一条 ai**,否则整体返回 `None` 不入队——没有交互就没有新信息。然后 `detect_signals` 在过滤后的**最近 6 条 human 消息**(`messages[-6:]`)上跑确定性正则,识别 6 类信号:`correction` / `reinforcement` / `preference` / `identity` / `goal` / `decision`。模式文件外置在 `core/message_patterns/*.yaml`(`patterns_dir` 可覆盖,加语言/业务短语不用改代码),正则全程**确定性匹配,不经过 LLM**。注意区分:**信号是"用户当前在做什么对话行为",事实类别是"这条信息是什么性质"**,名字部分重合但不是一一对应(`reinforcement` 是信号,却没有同名 category;它只用于给已有事实确认,§6.5)。
+过滤后必须**至少各有一条 human 和一条 ai**,否则整体返回 `None` 不入队——没有交互就没有新信息。然后 `detect_signals` 在过滤后的**最近 6 条 human 消息**(`messages[-6:]`)上跑确定性正则,识别 6 类信号:`correction` / `reinforcement` / `preference` / `identity` / `goal` / `decision`。模式文件外置在 `core/message_patterns/*.yaml`(`patterns_dir` 可覆盖,加语言/业务短语不用改代码)。这条路径本身**全程确定性、不经过 LLM**;信号集上另有一条**默认关闭**的可选增强——可插拔的**模型信号分类器**(`memory.signal_classification`,见 §4.4)对同一批文本给出 `reinforcement`/`correction` 提示标签并入提示文本,但确认门只读确定性信号集,模型标签写不出一条确认。注意区分:**信号是"用户当前在做什么对话行为",事实类别是"这条信息是什么性质"**,名字部分重合但不是一一对应(`reinforcement` 是信号,却没有同名 category;它只用于给已有事实确认,§5.4)。
 
 信号的第二个用途是**背压豁免**(§3.4)——这是它不只在 prompt 里当提示、还被提升为队列准入条件的原因。
 
@@ -158,7 +158,7 @@ def _prepare_update(self, messages):
 
 ## 3 队列:去抖、合并、背压、水位
 
-过滤通过后,`DeerMem.add()` 把 `(messages, signals)` 交给 `MemoryUpdateQueue`(`deermem/core/queue.py`,472 行)。这是写链路的中枢,负责把"每次对话都触发"的写入需求压缩成"低频、批量、不丢高价值"的抽取调用。
+过滤通过后,`DeerMem.add()` 把 `(messages, signals)` 交给 `MemoryUpdateQueue`(`deermem/core/queue.py`,477 行)。这是写链路的中枢,负责把"每次对话都触发"的写入需求压缩成"低频、批量、不丢高价值"的抽取调用。
 
 ### 3.1 入队对象与合并键
 
@@ -269,6 +269,15 @@ if max_depth > 0 and not bypass_watermark and not signals and existing is None \
 
 `update_memory` 的整个主体包在 try/except 里,任何失败(LLM 报错、解析失败、存储冲突)返回 `False` 并记日志,**从不向上抛**——队列循环也因此能继续处理下一个 context(否则一条坏更新会拖垮整批)。失败的后果只是"这次没记到":水位未前进,下一轮对话带着更完整的消息重抽。这就是整个写链路一以贯之的降级哲学:**宁可漏一次,不可错一次,绝不打断对话**。
 
+### 4.4 可选:pre-screen 成本闸门 + 模型信号分类(默认关)
+
+抽取调用之前,`_do_update_memory_sync_impl` 还会问一次**可选的判官**(host 通过 `judge` 钩子注入;默认无判官则整段跳过,抽取路径逐字节不变)。判官由 `agents/memory/judging.py`(共享 digest 缓存与文本工具)、`prescreen/`、`signals/` 两个 provider 组装,返回一个 `MemoryBatchVerdict`:
+
+- **pre-screen(成本闸门)**:`memory.prescreen.mode` = `off` / `shadow` / `enforce`。用一条 `noul` 问题判"这批值不值得花一次抽取调用";`enforce` 命中时**跳过抽取并推进水位**(该批按"无留存价值"消费)。**所有失败方向都是照常抽取**——报错 / 超时 / 无判定 / 超限批一律 extract;它闸的是成本,不是安全边界,也绝不替换 §5 的写闸门。
+- **signal classification(提示)**:`memory.signal_classification.mode` = `off` / `shadow` / `hints`。`hints` 时把模型给出的 `reinforcement` / `correction` 标签**并入** §4.1 的 `correction_hint`(提示文本取确定性信号与模型标签的**并集**);但 §5.4 的强化确认门只读**确定性信号集**,模型标签写不出一条确认。唯一例外:pre-screen `enforce` × classifier `hints` 时,模型暗示可**否决**一次 skip。
+- 判官不适用的批次(按此顺序跳过):无判官、紧急冲刷(`bypass_watermark`)、停机 drain(`judge=False`)、批内出现任意**确定性**信号(`detect_signals` 全窗口扫描——跳过会连带吞掉整批)、以及 `staleness_review_enabled` / `consolidation_enabled` 开启时(跳过会连带跳过该批的维护复查)。
+- 判官配置**热重载**:改 `memory.prescreen` / `memory.signal_classification` 时 `get_memory_manager()` 经 Tier-3 `refresh_judge` 只重建判官,存储 / 队列 / LLM 依赖不动,无需重启。
+
 ---
 
 ## 5 确定性闸门:scope=user + durable + descriptive 才入库
@@ -330,7 +339,7 @@ LLM 用 `factsToRemove` 表达"旧事实被推翻了",可带 `replacementFactInd
 
 ## 6 pre-summarization flush:压缩前把消息抢救进队列
 
-`SummarizationMiddleware`(链 18)压缩上下文时会把旧消息从 state 里删掉——**没有抢救钩子,这些对话就永远丢失**,而它们本该是记忆抽取的输入。`memory_flush_hook`(`agents/memory/summarization_hook.py`,28 行)就是为此存在的:
+`SummarizationMiddleware`(链 21)压缩上下文时会把旧消息从 state 里删掉——**没有抢救钩子,这些对话就永远丢失**,而它们本该是记忆抽取的输入。`memory_flush_hook`(`agents/memory/summarization_hook.py`,33 行)就是为此存在的:
 
 ```python
 def memory_flush_hook(event: SummarizationEvent) -> None:
@@ -359,7 +368,7 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
 
 ## 7 读链路与注入回环:DynamicContext 怎么把记忆放回去
 
-写链路产出的记忆,靠 `DynamicContextMiddleware`(链 **14**,lead-only 链里第一个被 append 的)在**每次模型调用前**放回上下文。它是记忆读链路最复杂的中间件,两条安全红线贯穿始终。
+写链路产出的记忆,靠 `DynamicContextMiddleware`(链 **17**,lead-only 链里第一个被 append 的)在**每次模型调用前**放回上下文。它是记忆读链路最复杂的中间件,两条安全红线贯穿始终。
 
 ### 7.1 读取路径与 <memory> 包裹
 
@@ -415,6 +424,8 @@ correction 必须是特权类——"别再犯同样的错"若因预算满被漏�
 | `memory.injection_enabled` | true | 是否注入 `<memory>`(可"只记不用") |
 | `memory.shutdown_flush_timeout_seconds` | 30 | 优雅停机 drain 预算(host 共享) |
 | `memory.manager_class` | `deermem` | 后端选择(fail-fast,不静默降级) |
+| `memory.prescreen.mode` | `off` | 抽取前成本闸门(off/shadow/enforce,§4.4) |
+| `memory.signal_classification.mode` | `off` | 模型信号提示(off/shadow/hints,§4.4) |
 | `backend_config.debounce_seconds` | 30 | 去抖窗口(1-300) |
 | `backend_config.queue_max_depth` | 1000 | 背压上限;0=不限;信号/紧急永远准入 |
 | `backend_config.watermark_max_keys` | 4096 | 对话水位 LRU 上限 |
@@ -433,6 +444,6 @@ correction 必须是特权类——"别再犯同样的错"若因预算满被漏�
 
 ## 小结
 
-把整条流水线压缩成一句话:**`MemoryMiddleware`(链 22)在每轮对话结束后把原始消息交给管理器;DeerMem 在入队前做四重过滤(类型白名单 + `hide_from_ui` 剔除 + trivial 剔除 + 上传块剥离)并要求"有来有回";`MemoryUpdateQueue` 按 `(thread,user,agent)` 去抖合并,`queue_max_depth` 背压只拒普通更新、信号与紧急冲刷永远准入;`MemoryUpdater` 在 Timer 线程上用一次同步 LLM 调用产出六类决策的 JSON;apply 层以 scope=user+durable+descriptive 的确定性闸门逐条 fail-closed,再经 staleness/consolidation/容量淘汰的确定性交集护栏;`SummarizationMiddleware` 压缩前通过 `memory_flush_hook`(add_nowait + bypass_watermark)抢救即将被删的消息;`DynamicContextMiddleware`(链 14)在每次模型调用前把格式化好的 `<memory>` 以 role=user 的隐藏消息冻结注入首条用户输入前——闭环。
+把整条流水线压缩成一句话:**`MemoryMiddleware`(链 25)在每轮对话结束后把原始消息交给管理器;DeerMem 在入队前做四重过滤(类型白名单 + `hide_from_ui` 剔除 + trivial 剔除 + 上传块剥离)并要求"有来有回";`MemoryUpdateQueue` 按 `(thread,user,agent)` 去抖合并,`queue_max_depth` 背压只拒普通更新、信号与紧急冲刷永远准入;`MemoryUpdater` 在 Timer 线程上用一次同步 LLM 调用产出六类决策的 JSON(可选地先经 `prescreen` 成本闸门与 `signals` 模型信号分类,默认关);apply 层以 scope=user+durable+descriptive 的确定性闸门逐条 fail-closed,再经 staleness/consolidation/容量淘汰的确定性交集护栏;`SummarizationMiddleware` 压缩前通过 `memory_flush_hook`(add_nowait + bypass_watermark)抢救即将被删的消息;`DynamicContextMiddleware`(链 17)在每次模型调用前把格式化好的 `<memory>` 以 role=user 的隐藏消息冻结注入首条用户输入前——闭环。
 
 写链路处处是"降级不丢":队列失败下轮重抽、水位失败不前进、背压只延迟不丢失、冲刷与普通更新共存。读链路处处是"宁缺毋滥":三标签闸门拒绝一切非用户级画像内容、注入只带得下预算内的最高置信度事实、correction 永远有特权席位、读失败默认空上下文也不拖垮对话。这两个原则——**异步写、保守读**——就是 DeerFlow 记忆系统所有设计的底层逻辑。

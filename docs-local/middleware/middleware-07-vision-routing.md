@@ -1,18 +1,19 @@
-# 视觉注入 · MCP 路由提升 · 延迟工具过滤 · 系统消息合并（链位 23、24、25、26）
+# 视觉注入 · MCP 路由提升 · 延迟工具过滤 · 系统消息合并（链位 26、27、28、29、30）
 
-> 本篇解析 Lead Agent（及子 Agent 复用）链末段的四个中间件。它们不参与沙箱/审计/执行，而是站在**模型请求边界**回答四个不同的问题：多模态模型怎么「看到」图片、海量 MCP 工具 schema 怎么不把上下文塞爆、「工具被提升」由谁说了算、严格后端为何拒绝「不在开头」的 SystemMessage。四个中间件的共同气质是 **per-request 化**：能不进 checkpoint 的 payload 一律不进（base64、合并后的 system 块），只写最小状态通道（`promoted`），并在每次模型调用前自清扫/自重建。
+> 本篇解析 Lead Agent（及子 Agent 复用）链末段的五个中间件。它们不参与沙箱/审计/执行，而是站在**模型请求边界**回答几个不同的问题：多模态模型怎么「看到」图片、海量 MCP 工具 schema 怎么不把上下文塞爆、「工具被提升」由谁说了算、有效提升怎么被如实审计、严格后端为何拒绝「不在开头」的 SystemMessage。这些中间件的共同气质是 **per-request 化**：能不进 checkpoint 的 payload 一律不进（base64、合并后的 system 块），只写最小状态通道（`promoted`），并在每次模型调用前自清扫/自重建。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
 
 ## 本文件覆盖的中间件
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 23 | `ViewImageMiddleware` | 多模态图片临时注入，base64 不进 checkpoint | `wrap_model_call` | 模型 `supports_vision` |
-| 24 | `McpRoutingMiddleware` | 从最新用户文本猜意图，提前提升延迟 MCP 工具 | `before_model` | `tool_search.enabled` 且 PR1 路由索引 |
-| 25 | `DeferredToolFilterMiddleware` | 延迟工具 schema 隐藏 / 拦截绕过调用 | `wrap_model_call` + `wrap_tool_call` | `tool_search.enabled` 且构建期有延迟工具 |
-| 26 | `SystemMessageCoalescingMiddleware` | 合并所有 SystemMessage 到开头唯一一块 | `wrap_model_call` | 恒装配（lead + subagent） |
+| 26 | `ViewImageMiddleware` | 多模态图片临时注入，base64 不进 checkpoint | `wrap_model_call` | 模型 `supports_vision` |
+| 27 | `McpRoutingMiddleware` | 从最新用户文本猜意图，提前提升延迟 MCP 工具 | `before_model` | `tool_search.enabled` 且 PR1 路由索引 |
+| 28 | `DeferredToolPromotionAuditMiddleware` | 观测最终 `tool_search` Command，审计有效提升 | `wrap_tool_call` | 有延迟工具（`deferred_setup.deferred_names`） |
+| 29 | `DeferredToolFilterMiddleware` | 延迟工具 schema 隐藏 / 拦截绕过调用 | `wrap_model_call` + `wrap_tool_call` | `tool_search.enabled` 且构建期有延迟工具 |
+| 30 | `SystemMessageCoalescingMiddleware` | 合并所有 SystemMessage 到开头唯一一块 | `wrap_model_call` | 恒装配（lead + subagent） |
 
-装配位置：lead 链在 `agents/lead_agent/agent.py::build_middlewares`（Memory 之后、SubagentLimit 之前）依序 append；subagent 运行时在 `agents/middlewares/tool_error_handling_middleware.py::_build_runtime_middlewares` 镜像同一顺序。**钩子选择规律**：要写图状态就用 `before_model`（McpRouting 的产物就是 `promoted`）；要改最终 request payload 就用 `wrap_model_call`（ViewImage 的 HumanMessage、Coalescing 的合并块都只在请求里存活）。看一个中间件用什么钩子，先问"它的产物住在哪里"。
+装配位置：ViewImage/McpRouting/DeferredToolFilter/Coalescing 四个在 lead 链的 `agents/lead_agent/agent.py::build_middlewares`（Memory 之后、SubagentLimit 之前）依序 append；subagent 运行时在 `agents/middlewares/tool_error_handling_middleware.py::build_subagent_runtime_middlewares` 镜像同一顺序。第 28 位 `DeferredToolPromotionAuditMiddleware` 例外——它物理上更早 append（紧随 SkillActivation 之后、SkillToolPolicy 之前），见 §2′。**钩子选择规律**：要写图状态就用 `before_model`（McpRouting 的产物就是 `promoted`）；要改最终 request payload 就用 `wrap_model_call`（ViewImage 的 HumanMessage、Coalescing 的合并块都只在请求里存活）。看一个中间件用什么钩子，先问"它的产物住在哪里"。
 
 **贯穿全篇的三个概念**：
 - **catalog_hash**：构建期由 MCP 延迟工具目录（deferred catalog）算出的身份哈希。凡是"延迟工具"都带它，把任何持久化的提升信息绑定到"当时那批工具"。目录改名/漂移后哈希变化，旧提升即刻作废——防陈旧 promotion 把改过名的工具暴露给模型。
@@ -33,7 +34,7 @@
 
 ### 1.2 钩子与执行时机
 
-- 链位 23（lead `agent.py` ~613；subagent `tool_error_handling_middleware.py` ~411），两者都用**解析后的运行时 model_name** 查模型配置，`supports_vision=True` 才 append——模型不支持视觉时整个机制不存在。
+- 链位 26（lead `agent.py` ~697；subagent `tool_error_handling_middleware.py` ~645），两者都用**解析后的运行时 model_name** 查模型配置，`supports_vision=True` 才 append——模型不支持视觉时整个机制不存在。
 - 钩子 `wrap_model_call` / `awrap_model_call`：每次真实模型调用前运行，但多数时候是 no-op——只有"最近一条 AIMessage 调用了 `view_image` 且其全部 tool_calls 都已返回"才注入。工具执行与注入之间隔着 ToolNode 的一次完整往返，注入发生在**紧接着的那次**模型调用。
 
 ### 1.3 内部实现逻辑
@@ -130,7 +131,7 @@ Provider ◀── […, HumanMessage(base64 image_url)]   ← 模型终于"看�
 `McpRoutingMiddleware` 是自动路由的写入端：每次模型调用前扫描**最新一条真实用户消息**的文本，命中索引就把工具名写进 `state["promoted"]`。它**只写状态**：不持有 `BaseTool`、不执行任何工具、不过滤任何 tool_call（那是 DeferredToolFilter 的事）——刻意缩成一个纯数据消费者/生产者，构造时只收"序列化的路由索引"。
 
 ### 2.2 钩子与执行时机
-- 链位 24（lead `agent.py` ~619；subagent 同序），在 DeferredToolFilter(25) **之前**——顺序是正确性的一部分（见 2.5 装配断言）。
+- 链位 27（lead `agent.py` ~702；subagent 同序），在 DeferredToolFilter(29) **之前**——顺序是正确性的一部分（见 2.5 装配断言）。
 - 钩子 `before_model` / `abefore_model`：它的产物是要落进图状态的 `promoted` 更新，是典型"状态型"中间件，与 ViewImage/Coalescing 的"payload 型"形成对照。
 - 装配条件（`tools/builtins/tool_search.py::build_mcp_routing_middleware`）：`deferred_setup.catalog_hash` 非 None、deferred_names 非空、且延迟工具中至少有一个带 `routing.mode="prefer"` 与非空 `keywords`；任一不满足返回 None（整个中间件不装配）。构造时**一次性**把 `BaseTool.metadata` 的路由信息压平成 `{tool_name: {"priority": int, "keywords": [str,…]}}`，此后中间件与工具对象完全解耦。
 - `top_k` 取全局 `tool_search.auto_promote_top_k`（默认 3，Field 校验 clamp 到 1..5）；工具级 `routing.auto_promote_top_k` 被忽略（log debug 提示）。
@@ -184,7 +185,7 @@ return {"promoted": {"catalog_hash": self._catalog_hash, "names": names}}
 ```
 
 ### 2.5 与邻居的关系（装配断言）
-- **必须在 DeferredToolFilter(25) 之前**。`wrap_model_call` 逐层外包、排前的是外层；`before_model` 的派发发生在 wrap 链贴近真实模型调用的内层。若 filter 包在 routing 外层，filter 计算隐藏集合时 routing 这次的 `promoted` 还没写入，**自动提升当轮失效、要等下一次模型调用才生效**——行为错误且无任何报错。`assert_mcp_routing_before_deferred_filter`（装配后立即调用）把这种静默失效变成 fail-fast 的 `RuntimeError`；lead 与 subagent 两个 builder 在 append DeferredToolFilter 后都跑它。
+- **必须在 DeferredToolFilter(29) 之前**。`wrap_model_call` 逐层外包、排前的是外层；`before_model` 的派发发生在 wrap 链贴近真实模型调用的内层。若 filter 包在 routing 外层，filter 计算隐藏集合时 routing 这次的 `promoted` 还没写入，**自动提升当轮失效、要等下一次模型调用才生效**——行为错误且无任何报错。`assert_mcp_routing_before_deferred_filter`（装配后立即调用）把这种静默失效变成 fail-fast 的 `RuntimeError`；lead 与 subagent 两个 builder 在 append DeferredToolFilter 后都跑它。
 - 与 **`tool_search` 工具**是互补双写方：tool_search 是"模型主动发现后提升"（执行时写 `promoted` 并返回 schema）；McpRouting 是"模型开口前替它提升"。二者经同一个 reducer 合并，互不覆盖。
 - 与 **InputSanitizationMiddleware**：路由读它保留的 `original_user_content`——相隔 20+ 个位置却共享同一个 server-owned 契约键，是"原文保留"跨层复用的范例。
 - 它**不消费** `promoted`（读方是 DeferredToolFilter），也不感知模型是否真用了被提升的工具——提升只是"给机会"，用不用由模型决定。
@@ -200,6 +201,41 @@ return {"promoted": {"catalog_hash": self._catalog_hash, "names": names}}
 
 ---
 
+## 2′. DeferredToolPromotionAuditMiddleware（链位 28 · 有效提升的审计）
+
+**源码**：`agents/middlewares/tool_promotion_audit_middleware.py`；recorder 契约
+`agents/middlewares/audit_context.py`；事件 tag `MIDDLEWARE_TOOL_PROMOTION_TAG`。
+
+### 它解决什么问题
+
+延迟工具的"提升"是持久化状态（`ThreadState.promoted`），而**有效**提升必须反映"经过策略过滤后模型真正拿到的 schema"。
+`tool_search` 返回的 `Command` 会被内层策略（`SkillToolPolicyMiddleware`）过滤——如果审计在策略之内/之后才看到结果，就可能
+把**被拒绝的名字**误记为"已提升"。本中间件观测**最终** `tool_search` 的 `Command`，把有效提升拍成审计事件（**不含私有 payload**）。
+
+### 钩子与执行时机
+
+- **`wrap_tool_call`**：只观测最终 `tool_search` `Command`，**原样返回该 Command**（不改写）。它为每个 lead run / 子代理执行
+  **原子地"认领"**新名字以去重并行搜索，子代理归因取自服务器安装的 recorder，记录失败 **fail-open**（遥测错误不影响工具结果）。
+- **必须 outer of `SkillToolPolicyMiddleware`**（ordering.py 强校验）：这正是它**物理装配**紧随 `SkillActivationMiddleware`（18）
+  之后、`SkillToolPolicyMiddleware`（19）之前 append 的原因（见 [05](middleware-05-context-injection.md) §2.2）。它虽按职能归入
+  延迟工具族（27 McpRouting / 28 Audit / 29 Filter）被编号为第 28 位，位置却比 26/27/29/30 都靠前——这是本篇最需要留意的
+  "职能分组编号 vs 物理下标"特例。
+
+### 与邻居的关系
+
+- **与 McpRouting（27）**：McpRouting 记的是自身 `before_model` 提升（`source="routing_hint"`）；本中间件记的是 `tool_search`
+  路线的结果——两条提升来源各有记录点，都进同一个 `merge_promoted` 语义。
+- **与 DeferredToolFilter（29）**：filter 是"读端执行者"（按 `promoted` 决定藏什么），本中间件是"结果审计者"，二者都不改
+  `promoted` 的读写语义。
+- **与 ToolReceipt / audit recorder**：与 LoopDetection 等一样经共享 audit recorder 汇报，而不是直接持 `RunJournal`。
+
+### 源码阅读指引
+
+`tool_promotion_audit_middleware.py`：`record_tool_promotion`（认领 + `recorder.record_middleware`，失败 fail-open）→
+`wrap_tool_call`/`awrap_tool_call`。契约见 `audit_context.py` 与 `runtime/events/catalog.py::MIDDLEWARE_TOOL_PROMOTION_TAG`。
+
+---
+
 ## 3. DeferredToolFilterMiddleware：schema 的"门卫"——隐藏与拦截双保险
 
 ### 3.1 它解决什么问题
@@ -209,7 +245,7 @@ return {"promoted": {"catalog_hash": self._catalog_hash, "names": names}}
 DeferredToolFilter 是该机制的**读端执行者**：模型绑定阶段从 `request.tools` 摘掉仍未提升的延迟工具 schema；调用阶段拦住模型"绕过发现直接调用"的漏网请求。它和 McpRouting 是同一枚硬币的两面——一个写 `promoted`，一个按 `promoted` 决定藏什么。
 
 ### 3.2 钩子与执行时机
-- 链位 25，`tool_search.enabled` 且构建期 `deferred_setup.deferred_names` 非空才装配（lead `agent.py` ~625、subagent `tool_error_handling_middleware.py` ~420）；空/None setup 是纯 no-op。
+- 链位 29，`tool_search.enabled` 且构建期 `deferred_setup.deferred_names` 非空才装配（lead `agent.py` ~711、subagent `tool_error_handling_middleware.py` ~658）；空/None setup 是纯 no-op。
 - 双钩子：`wrap_model_call`（每模型调用裁 schema）+ `wrap_tool_call`（每工具调用拦未提升者），各配 sync/async 四件套。
 - **构造期注入、fail-closed**：`deferred_names: frozenset` 与 `catalog_hash` 在 `__init__` 一次固化（来自 `DeferredToolSetup`），**故意不用 ContextVar**——运行期动态漂移会让"该藏谁"不可预测；集合在装配一刻钉死，目录变化靠重建 agent 生效。
 
@@ -275,7 +311,7 @@ model 的 tool_calls ─▶ wrap_tool_call ─▶ name ∈ _hidden(state)?
 ```
 
 ### 3.5 与邻居的关系
-- **读 McpRouting(24)/tool_search 写的 `promoted`**：自动路由在 `before_model` 写的提升、工具发现写的提升，都经 `merge_promoted` 落进 `ThreadState.promoted`，本中间件在同一模型调用读取生效；装配断言保证写方永远先于读方（见 §2.5）。
+- **读 McpRouting(27)/tool_search 写的 `promoted`**：自动路由在 `before_model` 写的提升、工具发现写的提升，都经 `merge_promoted` 落进 `ThreadState.promoted`，本中间件在同一模型调用读取生效；装配断言保证写方永远先于读方（见 §2.5）。
 - 与 **SkillToolPolicyMiddleware** 分工：技能策略裁"已激活技能的 allowed-tools"（行为 scoping）；本中间件裁"延迟 MCP 工具的发现前可见性"（带宽/注意力管理）。两者互不读对方状态，在模型绑定阶段各自过滤一遍。
 - 与 **Authorization Layer 1**：延迟目录在授权过滤之后装配（`assemble_deferred_tools`），ToolNode 持有的延迟工具已经过授权；本中间件的隐藏/拦截是机制完整性的门卫，不是安全边界。
 
@@ -302,7 +338,7 @@ DeerFlow 的 lead 链天然积累多条 SystemMessage，根源在 **DynamicConte
 `SystemMessageCoalescingMiddleware` 是 **provider 无关的统一修复层**：每次请求把 `request.system_message` + `request.messages` 里所有 SystemMessage 合并成一条、放在开头。此前 Claude 提供商在 `claude_provider._coalesce_system_messages` 里做过 per-provider 修补；现在上移为对所有后端一视同仁的中间件——一处修复、处处受益。
 
 ### 4.2 钩子与执行时机
-- 链位 26，lead 与 subagent builder 都**无条件 append**（`agent.py` ~637、`tool_error_handling_middleware.py` ~575）——四者中唯一没有装配条件的中间件。
+- 链位 30，lead 与 subagent builder 都**无条件 append**（`agent.py` ~721、`tool_error_handling_middleware.py` ~817）——五个中唯一没有装配条件的中间件。
 - 钩子 `wrap_model_call` / `awrap_model_call`，**刻意不用 `before_model`**：合并对象是"最终 request payload 里分离的 `system_message` 字段 + `messages` 列表"——这是 model-call handler 内部才扁平化的领域；`before_model` 只能看到图状态。用 wrap 让它在扁平化发生前、对最终载荷动手。
 - subagent 场景：builder 把**仅日期的上下文中间件（SubagentDateContextMiddleware）紧贴放在本合并器之前**，于是子代理的内建 prompt 与隐藏日期提醒仍以"一个开头的 system 块"抵达 provider。
 
@@ -371,7 +407,7 @@ checkpoint/state (永不变):
 
 ### 4.5 与邻居的关系
 - **DynamicContextMiddleware**：Coalescing 为它产生的"非开头 SystemMessage"善后——ID-swap 三元组与跨午夜追加都会制造严格后端的硬伤；两者经 `is_dynamic_context_reminder`（结构化标记而非内容嗅探）协作，去重语义与 DynamicContext 的日期注入同源。
-- **装配位置 26**：在 DynamicContext(14)、DurableContext(17) 等所有可能注入 system 的中间件**之后** append，合并时能看到全部来源；子代理的日期中间件被刻意放在它紧邻之前（AGENTS.md），使"prompt + 日期提醒"以单个 system 块抵达。
+- **装配位置 30**：在 DynamicContext(17)、DurableContext(20) 等所有可能注入 system 的中间件**之后** append，合并时能看到全部来源；子代理的日期中间件被刻意放在它紧邻之前（AGENTS.md），使"prompt + 日期提醒"以单个 system 块抵达。
 - 与 **DurableContextMiddleware** 的差异：DurableContext 把静态权威规则注入为 SystemMessage、把不可信数据注入为 HumanMessage——可信部分走 system 通道、会被本中间件收进合并块；不可信部分留在 HumanMessage，保持"用户可影响内容不获系统权威"。
 
 ### 4.6 设计权衡
@@ -386,12 +422,12 @@ checkpoint/state (永不变):
 
 ---
 
-## 5. 四个中间件的共同设计主线（读完源码后的复盘）
+## 5. 五个中间件的共同设计主线（读完源码后的复盘）
 
 1. **钩子跟着写目标走**：要落图状态（McpRouting → `promoted`）用 `before_model`；要改最终请求载荷（ViewImage 的图片消息、Coalescing 的合并块、DeferredToolFilter 的 schema 裁剪）用 `wrap_model_call`。
 2. **checkpoint 最小化**：ViewImage 的 20MB base64 不进 state；Coalescing 的合并结果不回写 messages；McpRouting 只在命中时写 `{catalog_hash, names}` 三字段。中断恢复、前缀缓存、历史扫描中间件是这三条决策的共同受益者——**凡是能每请求重建的东西，都不值得持久化**。
 3. **识别靠"保留前缀 + 服务端标记"双标识，不靠内容嗅探**：ViewImage 用它自清扫旧残留；Coalescing 靠 `dynamic_context_reminder` 结构化键去重；McpRouting 靠 `is_real_user_message` 排除注入消息。可伪造的内容从不作数，服务端持有的键才是事实。
 4. **fail-closed 与 fail-fast 并用**：DeferredToolFilter 的 hash 每次读校验（陈旧即全藏）；`assert_mcp_routing_before_deferred_filter` 装配时把"顺序错了但不报错"变成 RuntimeError。隐藏方向宁多不少，顺序错误宁炸不静默。
-5. **catalog_hash 是贯穿 24/25 的作用域键**：promotion 是持久化状态、工具目录却会漂移——把"谁被提升"绑定到"当时那批工具"的身份上，改名/增删后旧提升自动失效。这是"持久化数据必须携带自己的身份/有效期"的范例。
+5. **catalog_hash 是贯穿 27/29 的作用域键**：promotion 是持久化状态、工具目录却会漂移——把"谁被提升"绑定到"当时那批工具"的身份上，改名/增删后旧提升自动失效。这是"持久化数据必须携带自己的身份/有效期"的范例。
 
-**源码阅读顺序建议**：先 `thread_state.py`（`merge_viewed_images` / `merge_promoted` 两个 reducer 的语义），再按链序 23→26 各读一个文件；最后回到 `agents/lead_agent/agent.py::build_middlewares` 的 append 段落（含装配条件与断言），把"何时存在、在谁之前"钉进记忆。每个文件的 `release_policy_parameters` / provenance 戳是"该中间件对外承诺了什么行为"的声明式摘要，值得最后回看。
+**源码阅读顺序建议**：先 `thread_state.py`（`merge_viewed_images` / `merge_promoted` 两个 reducer 的语义），再按链序 26→30 各读一个文件；最后回到 `agents/lead_agent/agent.py::build_middlewares` 的 append 段落（含装配条件与断言），把"何时存在、在谁之前"钉进记忆。每个文件的 `release_policy_parameters` / provenance 戳是"该中间件对外承诺了什么行为"的声明式摘要，值得最后回看。

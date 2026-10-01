@@ -45,6 +45,8 @@
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+> 注:LangGraph 的 checkpointer 实际创建 **4 张表**——上面三张之外还有一张 `checkpoint_migrations`(只有一列 `v INTEGER`，记录 checkpointer 自身的 schema 迁移版本)。它不参与会话数据查询；DeerFlow 的 alembic 迁移也通过 `persistence/migrations/_env_filters.py::include_object` 把这四张表整体排除在外（它们由 LangGraph 独占管理，见 [backend/AGENTS.md] 的迁移说明）。详见文末「附:checkpoint_migrations」。
+
 ---
 
 ## 🔗 字段关联详解
@@ -134,6 +136,8 @@ ORDER BY cw.task_id, cw.idx;
 │ cp-003              │ task-003            │ 1   │ thread_data│ ~__pregel_pull│
 └─────────────────────┴─────────────────────┴─────┴──────────┴─────────────────┘
 ```
+
+> 注:上表的 `step` **不是 `checkpoints` 的真实列**——它是从 `metadata` JSON 里取出的派生值(即 `metadata->>'step'`)。`checkpoints` 的真实列只有 `thread_id` / `checkpoint_ns` / `checkpoint_id` / `parent_checkpoint_id` / `type` / `checkpoint(JSONB)` / `metadata(JSONB)`;`step`、`source`、`model` 等都属于 `metadata` JSON 内部字段。`channel_versions` 同理,是 `checkpoint` JSON 内部的字段,并非独立列。查询时用 `metadata->>'step'` 取用(见「查询场景」示例)。
 
 ### 示例 2: checkpoint JSON 结构
 
@@ -297,6 +301,22 @@ def restore_state(thread_id, checkpoint_id=None):
     
     return channel_values
 ```
+
+---
+
+## 🗂️ 附:LangGraph 自有的 checkpoint_migrations 表
+
+除上述三张数据表外，LangGraph 的 checkpointer 还会建一张**仅它自己使用**的小表:
+
+```sql
+-- checkpoint_migrations:checkpointer 自身的 schema 迁移版本(每行一个已应用的迁移)
+┌─────────────────────────┐
+│ v  INTEGER  (PK)        │  ← 已应用的迁移版本号
+└─────────────────────────┘
+```
+
+- 它**只关乎 checkpointer 自身的表结构演进**，不存任何会话/状态数据，业务查询不会碰它。
+- DeerFlow 的 alembic 通过 `persistence/migrations/_env_filters.py::include_object` 把 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` / `checkpoint_migrations` **整组排除**，所以这四张表由 LangGraph 独占管理，应用侧不要手写迁移去改它们。
 
 ---
 

@@ -1,6 +1,6 @@
 # 05 Lead Agent：装配与主循环
 
-> 基于 DeerFlow 最新源码（本仓库 commit 2672e209，2026-09）编写。
+> 基于 DeerFlow 最新源码（本仓库 commit `11b339d6`，2026-10-01）编写。
 > 本章代码位于 `backend/packages/harness/deerflow/agents/` 与
 > `backend/packages/harness/deerflow/client.py`，均为重构后的 harness 包
 > （`deerflow.*` 导入路径），与旧版 `backend/src/agents/lead_agent` 目录无关。
@@ -256,19 +256,26 @@ state_schema 换 delta 版），`state_schema` 由 `get_thread_state_schema(mode
 ### 5.3.1 共享底座（`build_lead_runtime_middlewares`）
 
 - **外层 wrap_model_call 包装**：`InputSanitizationMiddleware`（最外层，内层
-  看到的都是已净化的消息）、`ToolOutputBudgetMiddleware`（超限工具输出外置到
+  看到的都是已净化的消息）、`KnowledgeScopeMiddleware`（知识检索作用域门禁）、
+  `ToolOutputBudgetMiddleware`（超限工具输出外置到
   `.tool-results` 再截断）、`ToolResultSanitizationMiddleware`（`web_fetch`/
-  `web_search` 等远程内容工具结果做同样中和——攻击者网页不能伪造框架标签）；
+  `web_search` 等远程内容工具结果做同样中和——攻击者网页不能伪造框架标签）→
+  可选 `PiiRedactionMiddleware`（`pii_redaction.enabled` 时挂在最内层，工具结果
+  先脱敏再被中和/外置，用户消息也在其余重写后抵达）；
 - **线程钩子**：`ThreadDataMiddleware`（建线程目录桶，必须先于 Sandbox 保证
   thread_id 可用）→ `UploadsMiddleware`（lead 独有）→ `SandboxMiddleware`
   （惰性获取沙箱，`sandbox_id` 写 state）；
 - **收尾层**：`DanglingToolCallMiddleware`（为缺响应的 tool_calls 补占位
   ToolMessage）→ `LLMErrorHandlingMiddleware` → 可选 `ToolReceiptMiddleware`
-  → 授权 `GuardrailMiddleware`（authorization provider 包 adapter 做执行期
+  → 可选 `ArtifactResolutionMiddleware`（`tool_artifacts` 开启且
+  `resolve_handles_in_args`：在任何策略检查参数前解析产物 handle）→ 授权
+  `GuardrailMiddleware`（authorization provider 包 adapter 做执行期
   Layer 2 门禁，先于显式 guardrail 可省一次外部调用）→ 可选显式
   `GuardrailMiddleware` → `SandboxAuditMiddleware` → 可选
   `ReadBeforeWriteMiddleware` → 可选 `ToolProgressMiddleware` →
-  `ToolErrorHandlingMiddleware`（最内层，工具异常转 assistant 可见 ToolMessage）。
+  `ToolErrorHandlingMiddleware`（最内层，工具异常转 assistant 可见 ToolMessage）
+  → 可选 `ArtifactCaptureMiddleware`（`tool_artifacts` 开启：从工具结果抓取轻量
+  产物引用写入 `tool_artifacts` 通道）。
 
 ### 5.3.2 lead 专属层（`agent.py::build_middlewares` 追加顺序）
 
@@ -276,26 +283,27 @@ state_schema 换 delta 版），`state_schema` 由 `get_thread_state_schema(mode
 |---|--------|-----------------|
 | 1 | `DynamicContextMiddleware` | 恒加：日期（及可选记忆）作 `<system-reminder>` 注入首个 HumanMessage，系统提示词因此全静态（5.6） |
 | 2 | `SkillActivationMiddleware` | 恒加：`/skill-name` 开头时确定性加载完整 SKILL.md |
-| 3 | `SkillToolPolicyMiddleware` | 恒加：技能文件真正加载后才施加 allowed-tools |
-| 4 | `DurableContextMiddleware` | 恒加：在摘要压缩掉委托记录/技能读取前捕获，注入 durable 通道 |
-| 5 | summarization | `summarization` 开启时；尽早以压缩上下文 |
-| 6 | `TodoMiddleware` | **仅 plan mode**：`_create_todo_list_middleware(is_plan_mode)`，system_prompt/tool_description 源码内联 |
-| 7 | `TokenUsageMiddleware` | `token_usage.enabled` |
-| 8 | `TitleMiddleware` | 恒加：首轮后生成标题（其模型调用也须 `attach_tracing=False`） |
-| 9 | `MemoryMiddleware` | 记忆逻辑：tool 模式 + 后端要被动写入时加；非 tool 模式也加 |
-| 10 | `ViewImageMiddleware` | **仅当解析后的模型 `supports_vision`**（用运行时 model_name，避免陈旧配置） |
-| 11 | MCP routing 中间件 | `mcp_routing_middleware` 非空（tool_search 自动提升） |
-| 12 | `DeferredToolFilterMiddleware` | deferred 名单非空；随后 `assert_mcp_routing_before_deferred_filter` 校验顺序 |
-| 13 | `SystemMessageCoalescingMiddleware` | 恒加：合并所有 SystemMessage 为开头的单个——vLLM/SGLang/Qwen/Anthropic 拒绝非开头 SystemMessage |
-| 14 | `SubagentLimitMiddleware` | **仅 subagent_enabled**：截断超额并行 task 调用 |
-| 15 | `LoopDetectionMiddleware` | `loop_detection.enabled` |
-| 16 | `TokenBudgetMiddleware` | `token_budget.enabled`（per-run 上限） |
-| 17 | 调用方 `custom_middlewares` | 恒加（Clarification 之前注入） |
-| 18 | `load_configured_extension_middlewares` | 配置的扩展中间件 |
-| 19 | `TerminalResponseMiddleware` | 恒加：provider 返回空 AIMessage 时重试一次最终响应，兜“静默成功” |
-| 20 | `ModelLengthFinishReasonMiddleware` | 恒加：输出达上限时保留内容、打 `stop_reason` |
-| 21 | `SafetyFinishReasonMiddleware` | `safety_finish_reason.enabled` |
-| 22 | `ClarificationMiddleware` | **恒在最后**：模型调用后拦截澄清请求 |
+| 3 | `DeferredToolPromotionAuditMiddleware` | `deferred_setup.deferred_names` 非空时：因工具包装「first-in-list 为最外层」，须在 SkillToolPolicy 之前注册，才能观测每轮 `tool_search` 后最终的提升命令 |
+| 4 | `SkillToolPolicyMiddleware` | 恒加：技能文件真正加载后才施加 allowed-tools |
+| 5 | `DurableContextMiddleware` | 恒加：在摘要压缩掉委托记录/技能读取前捕获，注入 durable 通道 |
+| 6 | summarization | `summarization` 开启时；尽早以压缩上下文 |
+| 7 | `TodoMiddleware` | **仅 plan mode**：`_create_todo_list_middleware(is_plan_mode)`，system_prompt/tool_description 源码内联 |
+| 8 | `TokenUsageMiddleware` | `token_usage.enabled` |
+| 9 | `TitleMiddleware` | 恒加：首轮后生成标题（其模型调用也须 `attach_tracing=False`） |
+| 10 | `MemoryMiddleware` | 记忆逻辑：tool 模式 + 后端要被动写入时加；非 tool 模式也加 |
+| 11 | `ViewImageMiddleware` | **仅当解析后的模型 `supports_vision`**（用运行时 model_name，避免陈旧配置） |
+| 12 | MCP routing 中间件 | `mcp_routing_middleware` 非空（tool_search 自动提升） |
+| 13 | `DeferredToolFilterMiddleware` | deferred 名单非空；随后 `assert_mcp_routing_before_deferred_filter` 校验顺序 |
+| 14 | `SystemMessageCoalescingMiddleware` | 恒加：合并所有 SystemMessage 为开头的单个——vLLM/SGLang/Qwen/Anthropic 拒绝非开头 SystemMessage |
+| 15 | `SubagentLimitMiddleware` | **仅 subagent_enabled**：截断超额并行 task 调用 |
+| 16 | `LoopDetectionMiddleware` | `loop_detection.enabled` |
+| 17 | `TokenBudgetMiddleware` | `token_budget.enabled`（per-run 上限） |
+| 18 | 调用方 `custom_middlewares` | 恒加（Clarification 之前注入） |
+| 19 | `load_configured_extension_middlewares` | 配置的扩展中间件 |
+| 20 | `TerminalResponseMiddleware` | 恒加：provider 返回空 AIMessage 时重试一次最终响应，兜”静默成功” |
+| 21 | `ModelLengthFinishReasonMiddleware` | 恒加：输出达上限时保留内容、打 `stop_reason` |
+| 22 | `SafetyFinishReasonMiddleware` | `safety_finish_reason.enabled` |
+| 23 | `ClarificationMiddleware` | **恒在最后**：模型调用后拦截澄清请求 |
 
 注意 LangChain 的 `after_model` 钩子是**逆序**调度的：Clarification 最后注册
 却最先裁决；Safety 注册在 Terminal 之后，反而保证 Safety 先于
@@ -324,11 +332,16 @@ Terminal/accounting 执行。
 | `promoted` | `PromotedTools`(catalog_hash+names) | `merge_promoted` | 延迟工具提升**按 catalog hash 作用域**：hash 变则整体替换（防持久化裸名在目录漂移后指错工具）；同 hash 并集去重保序 |
 | `delegations` | `list[DelegationEntry]` | `merge_delegations` | 委托台账：同 id 以最新版替换、保留首见顺序；**终态永不被非终态降级**；只留最近 50 条 |
 | `skill_context` | `list[SkillEntry]` | `merge_skill_context` | 按 `path` 去重、最近读取刷新；只存引用**非 SKILL.md 正文**；最多 8 条 |
+| `tool_artifacts` | `list[ArtifactEntry]` | `merge_tool_artifacts` | 工具产物句柄注册表（#4676）：模型只见短 `handle`，真实引用（path/URL/task id）在此、调用时解析；按 `handle` 以最新版替换并保留首见顺序；末位 `trim_to` 指令把 `tool_artifacts.max_entries` 做成滑动窗口，绝对上限 1000 |
+| `tool_artifact_processed` | `list[str]` | `merge_artifacts` | 已处理的产物句柄：追加去重保序 |
+| `task_notes` | `dict \| None` | `merge_task_notes`（`TaskNotesChannel`） | 有界的模型报告式笔记：校验/归一化，最多 8 条、单条 750 字符、至多 4 个来源（`authority="model_report"`） |
+| `task_history` | `dict \| None` | 无 | 持久化的有界连续性历史（scope/batches/status），读取前经 `normalize_task_history` 校验 |
 | `summary_text` | `str \| None` | 无（LastValue） | 摘要通道，经 DurableContextMiddleware 投影进模型请求，**不写成 messages 条目** |
 | `background_tasks` | `list[BackgroundTaskState]` | 无 | MCP 长任务的有界投影 |
 
-reducer 集合被 `THREAD_STATE_REDUCER_FIELDS` 冻结（messages、sandbox、
-artifacts、todos、goal、viewed_images、promoted、delegations、skill_context）。
+reducer 集合被 `THREAD_STATE_REDUCER_FIELDS` 冻结，现为 **12 项**（messages、sandbox、
+artifacts、todos、goal、viewed_images、promoted、delegations、skill_context、
+tool_artifacts、tool_artifact_processed、task_notes）。
 
 ### 5.4.2 自定义 reducer 关键语义
 
@@ -684,8 +697,8 @@ if self._agent is not None and self._agent_config_key == key:
 - **产物**：`LeadAgentAssembly(graph, descriptor)`。图交给 LangGraph/Gateway/
   嵌入式客户端执行；descriptor 在有扩展观察者时构建，hash 化记录模型、提示词、
   工具、中间件栈、生效策略与构建信息。
-- **状态**：`ThreadState` 用 9+ 个自定义 reducer 维护沙箱/工件/目标/委托台账/
-  技能上下文等跨步状态；delta checkpoint 模式把 messages 换成
+- **状态**：`ThreadState` 用 11+ 个自定义 reducer 维护沙箱/工件/目标/委托台账/
+  技能上下文/工具产物/任务连续性等跨步状态；delta checkpoint 模式把 messages 换成
   `DeltaChannel(merge_message_writes)` 换 O(N) 存储。
 - **选项**：运行时 configurable 按“request > agent 配置 > 默认”决议；容量键
   （并发/总数/递归上限/执行容量）在中间件与提示词间夹取一致；`run_id` 缺失时

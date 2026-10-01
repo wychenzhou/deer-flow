@@ -1,6 +1,6 @@
 # 13 · 工具系统:注册、内置工具与执行链
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写。
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10)编写。
 >
 > 本章代码位于 `backend/packages/harness/deerflow/tools/`(装配)、
 > `tools/builtins/`(13 个内置工具源文件)、`sandbox/tools.py`(文件/bash 执行族)、
@@ -25,7 +25,7 @@
 
 深链与兄弟章节:
 
-- [第 06 章 中间件管道总纲](../chapters/06-middleware-pipeline.md) —— 35 链位语义地图;本章第 4 节只讲"工具执行"这一段洋葱的语义顺序。
+- [第 06 章 中间件管道总纲](../chapters/06-middleware-pipeline.md) —— 39 链位语义地图;本章第 4 节只讲"工具执行"这一段洋葱的语义顺序。
 - [中间件深链 03:错误处理](../middleware/middleware-03-error-handling.md) —— ToolErrorHandlingMiddleware 异常→错误 ToolMessage、`deerflow_tool_meta` 分类规则的完整状态机。
 - 第 07 章(上下文工程)的信任分层、第 08 章(子代理)的 `task` 工具,与本章互相引用。
 
@@ -41,8 +41,8 @@
        └→ LangGraph ToolNode:为每个 tool_call 执行工具
             └→ wrap_tool_call 洋葱(外层→内层):
                  ToolOutputBudget → ToolResultSanitization → SandboxMiddleware
-                 → ToolReceipt(夹心 #13a)→ Guardrail/授权 → SandboxAudit
-                 → ReadBeforeWrite → ToolProgress → ToolErrorHandling(夹心 #13b)
+                 → ToolReceipt(夹心 #15·外)→ Guardrail/授权 → SandboxAudit
+                 → ReadBeforeWrite → ToolProgress → ToolErrorHandling(夹心 #15·内)
                  → 沙箱授权门 + 懒初始化 → 工具函数本体
        └→ 结果以 ToolMessage 写回 state(messages 通道)
   └→ 回到 model:带着全部 ToolMessage 再生成下一段
@@ -67,7 +67,9 @@
 ## 2. 注册机制:没有全局 registry,只有"每次装配的合成"
 
 `tools/AGENTS.md` 开宗明义:`get_available_tools(groups, include_mcp, model_name,
-subagent_enabled)` 是**唯一合成点**。仓库里没有 `registry.register(...)` 式 API、
+subagent_enabled, *, mcp_plugins, include_upload_tool, include_conversation_reader,
+app_config, extensions, chat_model)` 是**唯一合成点**。仓库里没有
+`registry.register(...)` 式 API、
 没有 toolsets 概念——"工具存在"由三件事共同决定:配置文件写了什么、代码在哪个
 运行时条件下追加了什么、agent 装配时传入了什么开关。工具的生命周期是**装配期
 一次性决议**,之后每个线程的每次 run 复用同一份工具列表(agent 按 config 缓存),
@@ -143,18 +145,32 @@ agent)、`update_agent`(仅自定义 agent 且**非 webhook 渠道**——webhoo
 - ACP(Agent Client Protocol)工具 `invoke_acp_agent`:仅当 `config.yaml` 的
   `acp_agents` 非空时按配置**现场构建**(`build_invoke_acp_agent_tool`),每个外部
   agent 一个入口。
+- **会话读取工具 `read_conversation`**(`tools/conversation.py`,group
+  `conversation`,use `deerflow.tools.conversation:read_conversation`)是 config
+  声明但**默认被门禁拦下**的一类:只有 `include_conversation_reader=True` 且宿主
+  在 run 请求里提供了受信的会话读取器(`config.context` 的 `__conversation_reader`
+  能力)时,`get_available_tools` 才不把 `use == CONVERSATION_TOOL_USE` 的条目从
+  `tool_configs` 里剔除;embedded 调用与 subagent 一律 `False`。它按 `thread_id`
+  分页读**被显式引用**的会话(宿主逐次校验所有权与本次 run 的可读引用),不做搜索、
+  不碰附件,历史文本视为素材而非新指令。
 
-### 2.4 合成与去重:`get_available_tools` 的 201 行
+### 2.4 合成与去重:`get_available_tools` 的合成主体
 
-装配顺序 `config 工具 → builtins → MCP → ACP`,其间夹三道闸:
+装配顺序 `config 工具 → builtins → MCP → ACP`,其间夹若干道闸(filter):
 
-1. **host bash 守卫**:`is_host_bash_allowed(config)` 为假(本地沙箱默认)时,凡
+1. **config 条目预过滤**:`knowledge` 分组只在 `knowledge_base.enabled` 为真时
+   暴露;`use == deerflow.tools.conversation:read_conversation` 的条目只在
+   `include_conversation_reader=True` 时留下(§2.3)。
+2. **host bash 守卫**:`is_host_bash_allowed(config)` 为假(本地沙箱默认)时,凡
    `group=="bash"` 或 `use=="deerflow.sandbox.tools:bash_tool"` 的 config 工具
    一律不加载——本地文件系统不是隔离边界,主机 bash 默认不给模型。
-2. **sync 适配**:`_ensure_sync_invocable_tool` 给 async-only 工具挂
+3. **sync 适配**:`_ensure_sync_invocable_tool` 给 async-only 工具挂
    `make_sync_tool_wrapper`(tools/sync.py),使同步调用方(embedded client/TUI)也能
    执行;wrapper 在一个共享线程池(`tool-sync`)里跑协程并转发 RunnableConfig。
-3. **按 name 去重**:`seen_names` 集合保留**先到者**——即 config 装载工具优先于
+4. **write_file 预算标注**:传入的 `chat_model`(或 `model_config`)的有效输出上限
+   经 `_extract_max_tokens` 注入 `write_file` 描述(`PER-RESPONSE BUDGET`),提示
+   单次写超限会被截断、大文档改分段 `append=True`;工具被 clone,不污染模块级单例。
+5. **按 name 去重**:`seen_names` 集合保留**先到者**——即 config 装载工具优先于
    内建,内建优先于 MCP,ACP 垫底;重复者记 warning 丢弃(issue #1803:重名会让
    模型收到拼接 schema、路由却认另一个名)。去重前还会核对每个 config 条目的
    `cfg.name` 与工具对象自带 `.name` 是否一致,不一致以 `.name` 为准并告警。
@@ -217,19 +233,22 @@ bash 命令的 host 路径白名单与命令位置审计(配合 SandboxAuditMidd
 
 ### 3.2 第三族:搜索 / 抓取 / 浏览器 / 图像(community,可插拔)
 
-`community/` 下 24 个子包,每个都是一个 `config.yaml` 条目族,同名单工具互斥
+`community/` 下 26 个子包,每个都是一个 `config.yaml` 条目族,同名单工具互斥
 (`web_search` 只能开一个 provider)。`config.example.yaml` 的默认激活三件:
 
 - `web_search`(默认 ddg_search,DuckDuckGo 免 key;可换 tavily/brave/serper/
-  serply/exa/searxng/firecrawl/groundroute/fastcrw/tencent_wsa/infoquest)
+  serply/exa/searxng/firecrawl/groundroute/fastcrw/tencent_wsa/infoquest/sofya)
 - `web_fetch`(默认 jina_ai reader;可换 browserless/crawl4ai/exa/firecrawl/
-  groundroute/fastcrw/infoquest;SSRF 守卫 `allow_private_addresses` 默认关)
+  groundroute/fastcrw/infoquest/sofya/unbrowse;SSRF 守卫 `allow_private_addresses`
+  默认关)
 - `image_search`(默认 ddg;可换 serper/brave/infoquest)——模型生成前找参考图
 
-浏览器族 `browser_automation`(`browser_navigate/snapshot/click/type/get_text/back/
+知识库族(默认关,`knowledge_base.enabled` 打开):`ragflow` 与 `lightrag` 各提供
+`knowledge_search`(`ragflow` 另有 `list_knowledge_bases`)。浏览器族
+`browser_automation`(`browser_navigate/snapshot/click/type/get_text/back/
 screenshot/close`,group: browser)是有状态 agentic 浏览器,`[ref]` 数字索引寻址,
 与只读 web_fetch/web_capture 互补;沙箱 provider 族(`aio_sandbox`/`e2b_sandbox`/
-`boxlite`/`tenki`/`opensandbox`)提供隔离执行后端;`ragflow` 是知识库检索。全部
+`boxlite`/`tenki`/`opensandbox`)提供隔离执行后端。全部
 community 工具结果视作**远程内容**,进上下文前被 ToolResultSanitizationMiddleware
 中和框架标签(§4.2)。
 
@@ -253,7 +272,7 @@ LangChain 的 `AgentMiddleware.wrap_tool_call`/`awrap_tool_call` 提供"包裹�
 调用"的原语:每个中间件拿到 `ToolCallRequest` 和一个 `handler`,可选择先处理后
 放行、拒绝、改写结果。DeerFlow 在装配时把中间件列表按"外层 → 内层"语义排好,
 工具调用从外往里穿过,结果从里往外逐层返回。与工具执行直接相关的各层(链位号
-是第 06 章 35 槽地图的语义号,物理装配的 #13 夹心见 ch06 §2.3):
+是第 06 章 39 槽地图的语义号,物理装配的 #15 夹心见 ch06 §2.3):
 
 1. **ToolOutputBudgetMiddleware**(槽 2,最外层)——结果超预算则**外化**到磁盘
    (`.tool-results/`),上下文只留"类型化摘要 + read_file 引用"。
@@ -263,32 +282,32 @@ LangChain 的 `AgentMiddleware.wrap_tool_call`/`awrap_tool_call` 提供"包裹�
    原样放行。改写层在返回路径上往 `additional_kwargs["deerflow_tool_transforms"]`
    追加声明条目(`append_tool_transform(kind, by, version)`,有序,最后一条即最终
    可见字节的制造者)。
-3. **SandboxMiddleware**(槽 6)——懒获取的沙箱把 `sandbox_id` 以
+3. **SandboxMiddleware**(槽 7)——懒获取的沙箱把 `sandbox_id` 以
    `Command.update` 附着到本工具结果上,使 state 落库(已有 sandbox_id 则不动)。
-4. **ToolReceiptMiddleware**(槽 13a,9–13 段最外层)——给每个直接 ToolMessage
+4. **ToolReceiptMiddleware**(槽 15·外,11–15 段最外层)——给每个直接 ToolMessage
    及 `Command.update.messages` 里的 ToolMessage(含 task/present_files/
    view_image/tool_search 的自写消息)盖确定性 receipt;短路结果若未自盖章则回退
    `message.status`(§4.3)。
-5. **GuardrailMiddleware / 授权适配**(槽 9)——Layer 2 执行前授权
+5. **GuardrailMiddleware / 授权适配**(槽 11)——Layer 2 执行前授权
    (`authorization.enabled`)与显式 guardrail provider;deny 转错误 ToolMessage。
-6. **SandboxAuditMiddleware**(槽 10)——审计/分类 sandbox 命令(命令位置审计:
+6. **SandboxAuditMiddleware**(槽 12)——审计/分类 sandbox 命令(命令位置审计:
    `$(curl url)` 在命令位拦截、在值位放行);中危结果重建。防注入第二道,隔离边界
    仍是沙箱本身。
-7. **ReadBeforeWriteMiddleware**(槽 11,默认开)——写前读门:`read_file` 在结果上
+7. **ReadBeforeWriteMiddleware**(槽 13,默认开)——写前读门:`read_file` 在结果上
    盖内容哈希,`write_file` 覆写/追加与 `str_replace` 前校验最新哈希;无匹配则
    直接以 `recoverable_by_model=True` 的错误 ToolMessage 短路(消息即标记,摘要
    压缩天然使门失效,逼模型重读)。
-8. **ToolProgressMiddleware**(槽 12,可选)——停滞守卫,包在 ToolErrorHandling
+8. **ToolProgressMiddleware**(槽 14,可选)——停滞守卫,包在 ToolErrorHandling
    外面,保证它读到的是已盖章 `deerflow_tool_meta` 的结果;按三类错误
    (可恢复/瞬态/立即)推进 ACTIVE→WARNED→BLOCKED 状态机。
-9. **ToolErrorHandlingMiddleware**(槽 13b,最内层)——`GraphBubbleUp`(interrupt 等
+9. **ToolErrorHandlingMiddleware**(槽 15·内,最内层)——`GraphBubbleUp`(interrupt 等
    控制流)原样上抛;其余异常转 `status="error"` 的友好 ToolMessage("Error: Tool
    'x' failed with … Continue with available context…");**正常结果也经
    `normalize_tool_result` 盖章** —— 它是 `deerflow_tool_meta` 的生产者(§4.3)。
 10. **工具本体**——最内 handler 先走沙箱授权门 + `ensure_sandbox_initialized`
     懒初始化,再执行工具函数;普通字符串返回被 ToolNode 包成 ToolMessage。
 
-**注意分工**:槽 9–13 这段是"工具执行核心",各门可能短路或自产 ToolMessage,
+**注意分工**:槽 11–15 这段是"工具执行核心",各门可能短路或自产 ToolMessage,
 所以 receipt 物理上排在授权/审计/写前读/停滞**之前**(最外层);而 budget/
 sanitization 两个改写层更靠外,receipt 盖章发生在它们改写之前——receipt 记录的是
 **执行真相**(原始返回值),改写后可见字节以 `deerflow_tool_transforms` 轨迹另行
@@ -317,6 +336,13 @@ sanitization 两个改写层更靠外,receipt 盖章发生在它们改写之前�
 
 一句话浓缩:**内层执行真相(ToolErrorHandling 盖 meta)→ 外层事实记录(receipt)→
 更外层改写(sanitization/budget,轨迹进 transforms)**——三层各司其职,互不覆盖。
+
+此外还有一层**跨压缩的产物句柄**,与上面三层 `additional_kwargs` 元数据正交:
+`tools/artifact_registry.py` 从 `ToolMessage` 里抽取文件路径/URL/任务 id 等结构化
+引用,给每个产物算一个确定性短句柄(`art_` + 8 位),写进 `ThreadState.tool_artifacts`
+(issue #4676)。当上下文压缩把工具输出压成自然语言时,模型仍能凭 `art_xxxxxxxx`
+句柄跨轮引用该产物,而不必依赖已被压平的文字;抽取只认 `http(s)` URL 与绝对路径等
+可解析形态,`data:`/`blob:` 这类可夹带任意载荷的内嵌资源一律拒绝入状态。
 
 ### 4.4 错误路径与特殊流
 
@@ -359,6 +385,12 @@ sanitization 两个改写层更靠外,receipt 盖章发生在它们改写之前�
 运维建议:给 MCP 服务器起名/选工具时先查默认工具表(bash、write_file、
 web_search、present_files 等),同义工具(如第二个 web_fetch provider)只会被去重
 丢弃并刷 warning 日志。
+
+另有一条**来源标注**契约(`tools/tool_provenance.py`):每条绑定工具都带一个"来自
+哪里"的展示标签,解析顺序为 `deerflow_mcp` 标记 → 插件 tag → 声明的
+`deerflow_tool_source` → 模块启发式 → `builtin`。它服务于装配描述、追踪与企业上下文
+**展示**,**永远不是信任输入**——唯一需要确定性的判定(Layer-2 基础设施工具豁免)
+比较的是具体绑定的工具对象(`GuardrailRequest.tool_identity`),而非这个标签。
 
 ---
 

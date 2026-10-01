@@ -1,4 +1,4 @@
-# 安全守卫与终止性中间件：限额 · 死循环 · 预算 · 兜底（链位 27–35）
+# 安全守卫与终止性中间件：限额 · 死循环 · 预算 · 兜底（链位 31–39）
 
 > 本篇拆解 Lead Agent（及子 Agent）运行时中负责**终止性（termination）**与**收尾语义**的中间件：子代理限额、死循环硬停、token 预算硬停、安全/长度终止记账、空终态兜底、人机澄清。它把「失控 / 半途而废 / 空转」的 run 掐断或如实收尾，配合加法 `stop_reason` 给每次提前结束记账，并用 `after_model` 反向分派保证收尾顺序的正确性。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与[目录索引](README.md)。
@@ -8,15 +8,15 @@
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 27 | `SubagentLimitMiddleware` | 子代理并发/总量截断 | `after_model` | `subagent_enabled` |
-| 28 | `LoopDetectionMiddleware` | 重复 tool_calls 死循环硬停 | `after_model` + `wrap_model_call` | `loop_detection.enabled` |
-| 29 | `TokenBudgetMiddleware` | 单 run token 预算硬停 | `before_agent`/`after_model`/`wrap_model_call` | `token_budget.enabled`（默认关） |
-| 32 | `TerminalResponseMiddleware` | 空终态重试一次/兜底 | `after_model` + `wrap_model_call` | 恒装配 |
-| 33 | `ModelLengthFinishReasonMiddleware` | 长度截断记账（不改写） | `after_model` | 恒装配 |
-| 34 | `SafetyFinishReasonMiddleware` | 安全终止抑制工具/回填空内容 | `after_model` | `safety_finish_reason.enabled`（默认开） |
-| 35 | `ClarificationMiddleware` | 澄清中断等用户（必须最后） | `wrap_tool_call` + `after_model` | 恒装配 |
+| 31 | `SubagentLimitMiddleware` | 子代理并发/总量截断 | `after_model` | `subagent_enabled` |
+| 32 | `LoopDetectionMiddleware` | 重复 tool_calls 死循环硬停 | `after_model` + `wrap_model_call` | `loop_detection.enabled` |
+| 33 | `TokenBudgetMiddleware` | 单 run token 预算硬停 | `before_agent`/`after_model`/`wrap_model_call` | `token_budget.enabled`（默认关） |
+| 36 | `TerminalResponseMiddleware` | 空终态重试一次/兜底 | `after_model` + `wrap_model_call` | 恒装配 |
+| 37 | `ModelLengthFinishReasonMiddleware` | 长度截断记账（不改写） | `after_model` | 恒装配 |
+| 38 | `SafetyFinishReasonMiddleware` | 安全终止抑制工具/回填空内容 | `after_model` | `safety_finish_reason.enabled`（默认开） |
+| 39 | `ClarificationMiddleware` | 澄清中断等用户（必须最后） | `wrap_tool_call` + `after_model` | 恒装配 |
 
-> 30、31（自定义 / 配置扩展中间件插入点）只讲装配语义、不属深挖对象，本篇 §0.2 说明它们的插入约束。支撑模块：`safety_termination_detectors.py`、`model_length_termination_detectors.py`、`_bounded_dict.py`、`tool_call_metadata.py`。
+> 34、35（自定义 / 配置扩展中间件插入点）只讲装配语义、不属深挖对象，本篇 §0.2 说明它们的插入约束。支撑模块：`safety_termination_detectors.py`、`model_length_termination_detectors.py`、`_bounded_dict.py`、`tool_call_metadata.py`。
 
 ---
 
@@ -31,56 +31,56 @@
 
 | 层 | 中间件(链位) | 探测什么 | 触发时机 | 行为 |
 |---|---|---|---|---|
-| ① 主动硬停:调用模式 | `LoopDetectionMiddleware`(28) | 模型**重复发出同一组 tool_calls** / 单工具调用频率爆炸 | 每次模型响应后(after_model) | 先 warn 注入;超硬限则**剥离 tool_calls 强制终答**,`stop_reason=loop_capped` |
-| ① 主动硬停:预算 | `TokenBudgetMiddleware`(29) | 单 run token 用量(输入/输出/总量)超阈值 | 每次模型响应后 | warn 注入;超硬限剥 tool_calls 强制终答,`token_capped` |
-| ② 终止语义:识别 provider 终止信号 | `SafetyFinishReasonMiddleware`(34) + `ModelLengthFinishReasonMiddleware`(33) | provider 已用 `finish_reason`/`stop_reason` 声明"安全截断 / 长度截断" | after_model,反向分派中先于 ① 看到原始响应 | Safety 剥残缺 tool_calls / 回填空响应,`safety_capped`;ModelLength 纯记账,`model_length_capped`;都不抛异常、保留真实原因 |
-| ③ 兜底:什么都没发生 | `TerminalResponseMiddleware`(32) | 工具执行后模型返回**空终态 AIMessage**(无文本、无工具意图) | after_model(收尾段最后触发) | 隐藏恢复提示重试一次;仍空 → 可见错误 fallback 标记,run 以 **error** 结束而非"静默成功" |
+| ① 主动硬停:调用模式 | `LoopDetectionMiddleware`(32) | 模型**重复发出同一组 tool_calls** / 单工具调用频率爆炸 | 每次模型响应后(after_model) | 先 warn 注入;超硬限则**剥离 tool_calls 强制终答**,`stop_reason=loop_capped` |
+| ① 主动硬停:预算 | `TokenBudgetMiddleware`(33) | 单 run token 用量(输入/输出/总量)超阈值 | 每次模型响应后 | warn 注入;超硬限剥 tool_calls 强制终答,`token_capped` |
+| ② 终止语义:识别 provider 终止信号 | `SafetyFinishReasonMiddleware`(38) + `ModelLengthFinishReasonMiddleware`(37) | provider 已用 `finish_reason`/`stop_reason` 声明"安全截断 / 长度截断" | after_model,反向分派中先于 ① 看到原始响应 | Safety 剥残缺 tool_calls / 回填空响应,`safety_capped`;ModelLength 纯记账,`model_length_capped`;都不抛异常、保留真实原因 |
+| ③ 兜底:什么都没发生 | `TerminalResponseMiddleware`(36) | 工具执行后模型返回**空终态 AIMessage**(无文本、无工具意图) | after_model(收尾段最后触发) | 隐藏恢复提示重试一次;仍空 → 可见错误 fallback 标记,run 以 **error** 结束而非"静默成功" |
 
 - **① 主动掐断**:系统自己判断"再这样下去没完了"(重复调用、超预算),不等 provider,自己剥 tool_calls 让 run 自然产出终答,**不抛异常**——抛异常会让子代理执行器/worker 看到 raw 崩溃,"带着被迫终答结束"才是可控的。
 - **② 如实记账 + 防残骸**:provider 中途给出终止信号而响应本身是残的(半截 tool_calls、或全空)。系统不重试、不改写,只**防止残骸被当成干净的、可执行的成功**。
 - **③ 最后防线**:①② 都没触发、provider 也没给信号,但 turn 就是空手而归——绝不允许"看似成功、实则什么都没说"。
 
-### 0.2 链位置:27–35 与自定义/扩展插入点
+### 0.2 链位置:31–39 与自定义/扩展插入点
 
-Lead 链由两段拼成:共享基础段(1–26,`tool_error_handling_middleware.py::_build_runtime_middlewares` → `build_lead_runtime_middlewares`,子代理经 `build_subagent_runtime_middlewares` 复用大部分),再在 `lead_agent/agent.py::build_middlewares` 追加 lead-only 段:
+Lead 链由两段拼成:共享基础段(1–30,`tool_error_handling_middleware.py::_build_runtime_middlewares` → `build_lead_runtime_middlewares`,子代理经 `build_subagent_runtime_middlewares` 复用大部分),再在 `lead_agent/agent.py::build_middlewares` 追加 lead-only 段:
 
 ```
-26 SystemMessageCoalescing
-27 SubagentLimitMiddleware        (可选, subagent_enabled)
-28 LoopDetectionMiddleware        (可选, loop_detection.enabled)
-29 TokenBudgetMiddleware          (可选, token_budget.enabled)
-30 自定义中间件 custom_middlewares      ← 程序化注入点
-31 扩展中间件 extensions.middlewares   ← config 声明注入点(reflection resolve_class)
-32 TerminalResponseMiddleware         ← 收尾段开始(语义上不可被扩展改写)
-33 ModelLengthFinishReasonMiddleware
-34 SafetyFinishReasonMiddleware    (可选, safety_finish_reason.enabled,默认开)
-35 ClarificationMiddleware         ← 必须最后
+30 SystemMessageCoalescing
+31 SubagentLimitMiddleware        (可选, subagent_enabled)
+32 LoopDetectionMiddleware        (可选, loop_detection.enabled)
+33 TokenBudgetMiddleware          (可选, token_budget.enabled)
+34 自定义中间件 custom_middlewares      ← 程序化注入点
+35 扩展中间件 extensions.middlewares   ← config 声明注入点(reflection resolve_class)
+36 TerminalResponseMiddleware         ← 收尾段开始(语义上不可被扩展改写)
+37 ModelLengthFinishReasonMiddleware
+38 SafetyFinishReasonMiddleware    (可选, safety_finish_reason.enabled,默认开)
+39 ClarificationMiddleware         ← 必须最后
 ```
 
-30/31 两个插入点的含义:
+34/35 两个插入点的含义:
 
-- 用户中间件只能插在 30(代码显式传 `custom_middlewares`)或 31(config.yaml / extensions_config.json 的 `module.path:ClassName`,经 `deerflow.reflection.resolve_class` 加载,缺失/非法在装配期 loud fail;该路径实例化任意代码,视为可信操作者输入)。
-- 它们**必须落在 Loop/Token 两个守卫之后、收尾段 32–35 之前**:若在 Loop/Token 之前,其 after_model 会先看到"尚未被剥 tool_calls"的失控响应;收尾段 35 之后**没有任何注册位**,Clarification 的 `Command(goto=END)` 中断语义因此不可被扩展绕过。subagent 收到同一份扩展中间件列表,同样置于其 safety tail 之前。
+- 用户中间件只能插在 34(代码显式传 `custom_middlewares`)或 35(config.yaml / extensions_config.json 的 `module.path:ClassName`,经 `deerflow.reflection.resolve_class` 加载,缺失/非法在装配期 loud fail;该路径实例化任意代码,视为可信操作者输入)。
+- 它们**必须落在 Loop/Token 两个守卫之后、收尾段 36–39 之前**:若在 Loop/Token 之前,其 after_model 会先看到"尚未被剥 tool_calls"的失控响应;收尾段 39 之后**没有任何注册位**,Clarification 的 `Command(goto=END)` 中断语义因此不可被扩展绕过。subagent 收到同一份扩展中间件列表,同样置于其 safety tail 之前。
 - ### 0.3 after_model 反向分派:收尾顺序为什么是 TerminalResponse → ModelLength → Safety → Clarification
 
 LangChain factory 把 with-after_model 的中间件按**注册列表逆序**接边(`add_edge("model", middleware_w_after_model[-1])` 后从后往前走):
-**最后注册的中间件最先看到模型输出**,其 state 更新先落地,后面的中间件看到的是已更新的 state。注册顺序 32→33→34→35,所以 after_model 的**实际动作顺序**是:
+**最后注册的中间件最先看到模型输出**,其 state 更新先落地,后面的中间件看到的是已更新的 state。注册顺序 36→37→38→39,所以 after_model 的**实际动作顺序**是:
 
 ```
 模型输出 AIMessage
-   ▼ (35 Clarification 最先看到原始输出)
- 35 Clarification   若 ask_clarification 与 sibling 同批 → 先剥 sibling,
+   ▼ (39 Clarification 最先看到原始输出)
+ 39 Clarification   若 ask_clarification 与 sibling 同批 → 先剥 sibling,
                     只留澄清调用交给工具路由                    (§7)
-   ▼ (34 Safety 第二个)
- 34 SafetyFinish    安全终止且带 tool_calls → 剥离;空内容 → 回填说明
+   ▼ (38 Safety 第二个)
+ 38 SafetyFinish    安全终止且带 tool_calls → 剥离;空内容 → 回填说明
                     (此时 Clarification 已剥过 sibling)          (§6)
-   ▼ (33 ModelLength 第三个)
- 33 ModelLength     终态 + 可见内容 + 长度信号 → 记 stop_reason, 不改消息 (§5)
-   ▼ (32 TerminalResponse 最后)
- 32 TerminalResponse此时检查"是否空终态": Safety 已回填 → 放行不误重试;
+   ▼ (37 ModelLength 第三个)
+ 37 ModelLength     终态 + 可见内容 + 长度信号 → 记 stop_reason, 不改消息 (§5)
+   ▼ (36 TerminalResponse 最后)
+ 36 TerminalResponse此时检查"是否空终态": Safety 已回填 → 放行不误重试;
                     真仍空 → RemoveMessage + jump_to=model 重试一次  (§4)
    ▼
- …(29 Token / 28 Loop / 27 Limit / 30-31 自定义·扩展 最后跑, 基于已清理的消息)
+ …(33 Token / 32 Loop / 31 Limit / 34-35 自定义·扩展 最后跑, 基于已清理的消息)
 ```
 
 这个顺序是**正确性**,不是实现细节:
@@ -121,7 +121,7 @@ runtime.context["stop_reason"]   ← 落点一:worker 直接读(不需要中间�
 
 ---
 
-## 1. SubagentLimitMiddleware——子代理委派限额(链 27)
+## 1. SubagentLimitMiddleware——子代理委派限额(链 31)
 
 文件:`agents/middlewares/subagent_limit_middleware.py`(181 行)
 
@@ -134,7 +134,7 @@ runtime.context["stop_reason"]   ← 落点一:worker 直接读(不需要中间�
 ### 钩子与执行时机 / 链位置
 
 - 只实现 `after_model`/`aafter_model`(趁 tool_calls 还在 AIMessage 上、工具执行前)。
-- 链位置 27,**可选**(`subagent_enabled` 才装配)。
+- 链位置 31,**可选**(`subagent_enabled` 才装配)。
 - `max_concurrent`:装配前已解析为 `min(per-run 请求, 启动冻结的 subagent_runtime.max_running, 安全上界 1–64)`,并与 lead prompt 共享同一值(热更新不得让任何一层宣传超过已建进程控制器);构造函数再 `_clamp_subagent_limit` 兜底到 [1,64]。
 - `max_total`:默认 `DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN=6`,clamp [1,50];运行时 `max_total_subagents` 可覆盖,同范围。
 
@@ -197,7 +197,7 @@ clone(同 id 替换) → {"messages":[…]} → 模型带剩余调用继续 / �
 
 ### 与邻居的关系
 
-- 位于收尾段前最早的 lead-only 守卫;剥掉 task 后,LoopDetection(28) 计数的 tool_calls 已不含被截断的 task,TokenBudget(29) 也不会为从未执行的调用计 token。
+- 位于收尾段前最早的 lead-only 守卫;剥掉 task 后,LoopDetection(32) 计数的 tool_calls 已不含被截断的 task,TokenBudget(33) 也不会为从未执行的调用计 token。
 - 被截断的 task 从未执行 → 无 receipt、不进 ledger;账本只反映**真实捕获**的委派,`_count_prior_delegations` 按 delegation id 去重,防同一委派在状态多帧里被重复计。
 ### 设计权衡
 
@@ -211,7 +211,7 @@ clone(同 id 替换) → {"messages":[…]} → 模型带剩余调用继续 / �
 `subagent_limit_middleware.py`:重点读 `_truncate_task_calls`(双维计算)、`_count_prior_delegations`(run_id 过滤 + id 去重)、`_TOTAL_LIMIT_STOP_MSG`。
 ---
 
-## 2. LoopDetectionMiddleware——死循环防护:调用模式层(链 28)
+## 2. LoopDetectionMiddleware——死循环防护:调用模式层(链 32)
 
 文件:`agents/middlewares/loop_detection_middleware.py`(842 行,七个里最复杂)
 
@@ -224,7 +224,7 @@ P0 安全:模型陷入"调工具→看结果→再调同一工具"的死循环�
 - `after_model`/`aafter_model`:检测 + 入队警告或硬停。
 - `wrap_model_call`/`awrap_model_call`:把入队警告追加到下一次请求消息尾部。
 - `before_agent`:清本线程**其他 run** 遗留的 pending 警告;`after_agent`:清**本 run** 残余 pending 警告(警告是瞬态的,run 结束未发出即弃,不跨调用残留)。
-- 链位置 28,**可选**(`loop_detection.enabled`)。**跨 run 保留 `_history`**(调用模式时间不变;与 ToolProgress 的"每 run 清空"故意相反,§0.1 注)。
+- 链位置 32,**可选**(`loop_detection.enabled`)。**跨 run 保留 `_history`**(调用模式时间不变;与 ToolProgress 的"每 run 清空"故意相反,§0.1 注)。
 
 ### 内部实现逻辑
 
@@ -278,8 +278,8 @@ after_model: 取 last AIMessage 的 tool_calls
 
 ### 与邻居的关系
 
-- **与 ToolProgressMiddleware(12)分工**:调用模式 vs 结果质量——Loop 在模型响应后看 tool_calls 签名、硬停整轮;ToolProgress 在工具执行后按 (thread,tool) 状态机只封"不产生新信息"的单工具。两者可同时注入提示、互不读对方状态;Loop 硬停后 wrap_tool_call 不再发出,ToolProgress 自然不触发,**无双停**(harness-strategies §9.7.3)。
-- **与 SafetyFinishReason(34)**:共享 `clone_ai_message_with_tool_calls` 剥离机制但触发不同;注册序 Safety 在 Loop 后 → 反向分派 Safety 先清理、Loop 后计数(§0.3 第 2 条)。
+- **与 ToolProgressMiddleware(14)分工**:调用模式 vs 结果质量——Loop 在模型响应后看 tool_calls 签名、硬停整轮;ToolProgress 在工具执行后按 (thread,tool) 状态机只封"不产生新信息"的单工具。两者可同时注入提示、互不读对方状态;Loop 硬停后 wrap_tool_call 不再发出,ToolProgress 自然不触发,**无双停**(harness-strategies §9.7.3)。
+- **与 SafetyFinishReason(38)**:共享 `clone_ai_message_with_tool_calls` 剥离机制但触发不同;注册序 Safety 在 Loop 后 → 反向分派 Safety 先清理、Loop 后计数(§0.3 第 2 条)。
 ### 设计权衡
 
 - **加法 stop_reason 不改协议**:`loop_capped` 只是一个字符串,执行器 pop 即可区分"loop-capped completion"与"干净完成",无需给消息结构加字段(§0.4)。
@@ -292,7 +292,7 @@ after_model: 取 last AIMessage 的 tool_calls
 
 ---
 
-## 3. TokenBudgetMiddleware——预算硬停(链 29)
+## 3. TokenBudgetMiddleware——预算硬停(链 33)
 
 文件:`agents/middlewares/token_budget_middleware.py`(317 行)
 
@@ -306,7 +306,7 @@ after_model: 取 last AIMessage 的 tool_calls
 - `after_model`/`aafter_model`:差值累计 + 阈值判定(警告入队 / 硬停改写)。
 - `wrap_model_call`:注入预算警告(`HumanMessage(name="budget_warning")`)。
 - `after_agent`:清本 run 的 warned/pending/seen/cumulative(**不清 `_stop_reason`**,留给执行器 pop)。
-- 链位置 29,**可选**(`token_budget.enabled`,默认关)。
+- 链位置 33,**可选**(`token_budget.enabled`,默认关)。
 
 ### 内部实现逻辑
 
@@ -343,8 +343,8 @@ after_agent: 清 warned/pending/seen/cumulative; _stop_reason 留给 consume_sto
 
 ### 与邻居的关系
 
-- **与 LoopDetection(28)**:预算维度与调用模式维度互为补集(重复 vs 超支),硬停动作逐字对称;执行器 `_consume_guard_stop_reason` 收集**所有**暴露 `consume_stop_reason` 的守卫逐个 pop,先非 None 者胜。
-- **与 TokenUsageMiddleware(20)**:TokenUsage 负责记录与归因(把子代理用量写回 dispatching AIMessage 的 usage_metadata);TokenBudget 只消费这些数字——差值追踪专为兼容"事后回溯合并"而设计。
+- **与 LoopDetection(32)**:预算维度与调用模式维度互为补集(重复 vs 超支),硬停动作逐字对称;执行器 `_consume_guard_stop_reason` 收集**所有**暴露 `consume_stop_reason` 的守卫逐个 pop,先非 None 者胜。
+- **与 TokenUsageMiddleware(23)**:TokenUsage 负责记录与归因(把子代理用量写回 dispatching AIMessage 的 usage_metadata);TokenBudget 只消费这些数字——差值追踪专为兼容"事后回溯合并"而设计。
 ### 设计权衡
 
 - **差值 vs 全量重算**:全量重算无法区分"重放后数字变大是新增还是重复";差值把每个 msg.id 的计量变单调一次,重入安全。
@@ -357,7 +357,7 @@ after_agent: 清 warned/pending/seen/cumulative; _stop_reason 留给 consume_sto
 `token_budget_middleware.py`:docstring → `_get_run_id` → `before_agent`(快照)→ `_apply`(差值累计与三维判定,注意 `usage_accum.total <= 0` 早退)→ `_build_hard_stop_update`(与 Loop 的同名函数对比,几乎同构)→ `consume_stop_reason` → `_drain_pending_warnings`/`_inject_warnings`。
 ---
 
-## 4. TerminalResponseMiddleware——空终态兜底(链 32)
+## 4. TerminalResponseMiddleware——空终态兜底(链 36)
 
 文件:`agents/middlewares/terminal_response_middleware.py`(223 行)
 
@@ -370,7 +370,7 @@ after_agent: 清 warned/pending/seen/cumulative; _stop_reason 留给 consume_sto
 - `after_model`/`aafter_model`,带 `@hook_config(can_jump_to=["model"])`(允许返回 `jump_to` 重调度 model 节点)。
 - `wrap_model_call`:注入隐藏恢复提示。
 - `before_agent`/`after_agent`:清理 per-(thread,run) 状态。
-- 链位置 32:收尾段**最先注册**(反向分派里**最后触发**,§0.3)——它是兜底,必须看到 Safety 回填等前面所有改写之后的最终状态。
+- 链位置 36:收尾段**最先注册**(反向分派里**最后触发**,§0.3)——它是兜底,必须看到 Safety 回填等前面所有改写之后的最终状态。
 ### 内部实现逻辑
 
 三个检测闸门(全满足才干预):
@@ -425,9 +425,9 @@ after_model(last)
 
 ### 与邻居的关系
 
-- **与 SafetyFinishReason(34)的顺序耦合**(§0.3 第 3 条):Safety 先回填空内容 → Terminal 后判"有内容"放行,不会对"因安全而故意空"的响应做无谓重试;顺序颠倒则 Terminal 先 RemoveMessage+重试一个本质是安全终止的响应。
-- **与 Clarification(35)**:澄清走 `Command(goto=END)` 中断等用户,不产生"工具执行后空终态";且 Clarification 先剥 sibling,Terminal 处理的集合已不含被弃调用。
-- **覆盖关系**:ModelLength(33) 记录"长度截断但有内容";Terminal 处理"截断到一点内容都没有"的极端情形(provider 连信号都没给,纯空)——合起来保证**有内容的截断可审计、无内容的空手有兜底**。
+- **与 SafetyFinishReason(38)的顺序耦合**(§0.3 第 3 条):Safety 先回填空内容 → Terminal 后判"有内容"放行,不会对"因安全而故意空"的响应做无谓重试;顺序颠倒则 Terminal 先 RemoveMessage+重试一个本质是安全终止的响应。
+- **与 Clarification(39)**:澄清走 `Command(goto=END)` 中断等用户,不产生"工具执行后空终态";且 Clarification 先剥 sibling,Terminal 处理的集合已不含被弃调用。
+- **覆盖关系**:ModelLength(37) 记录"长度截断但有内容";Terminal 处理"截断到一点内容都没有"的极端情形(provider 连信号都没给,纯空)——合起来保证**有内容的截断可审计、无内容的空手有兜底**。
 
 ### 设计权衡
 
@@ -441,7 +441,7 @@ after_model(last)
 `terminal_response_middleware.py`:docstring → `_has_visible_content`/`_has_tool_call_intent_or_error`/`_tool_result_in_current_turn`(三个闸门,与 ModelLength/Safety 的同名函数对比差异)→ `_apply`(budget 与两分支)→ `_RECOVERY_PROMPT`/`_FALLBACK_CONTENT` → `_augment_request`(隐藏注入)。
 ---
 
-## 5. ModelLengthFinishReasonMiddleware——长度截断记账(链 33)
+## 5. ModelLengthFinishReasonMiddleware——长度截断记账(链 37)
 
 文件:`agents/middlewares/model_length_finish_reason_middleware.py`(130 行,最小)
 
@@ -452,7 +452,7 @@ provider 因**输出预算耗尽**停止生成(`finish_reason='length'` / `stop_
 ### 钩子与执行时机 / 链位置
 
 - 只实现 `after_model`/`aafter_model`;**纯观察**:命中只写 `runtime.context["stop_reason"]` + INFO 日志,永不返回 state 更新(不改任何消息)。
-- 链位置 33,注册在 Safety(34) 之前 → 反向分派中 ModelLength 在 Safety **之后**看到消息(先剥离/回填,后记账),在 TerminalResponse(32) 之前看到消息(先 stamp,后判空)。
+- 链位置 37,注册在 Safety(38) 之前 → 反向分派中 ModelLength 在 Safety **之后**看到消息(先剥离/回填,后记账),在 TerminalResponse(36) 之前看到消息(先 stamp,后判空)。
 ### 内部实现逻辑
 
 ```python
@@ -495,7 +495,7 @@ after_model(last)
 ### 与邻居的关系
 
 - **与 SafetyFinishReason 分工(§0.1 第②层两半)**:Safety 管安全截断(content_filter/refusal/SAFETY),ModelLength 管长度截断——都不抛异常,保留可见内容。`MAX_TOKENS` 被 Gemini **安全**检测器**故意排除**(`safety_termination_detectors.py` 注释:"output length truncation, not safety … expose separately"),正由本中间件单独负责——**同一信号在两类检测器里只归属一类**,不双重记账。
-- **与 TerminalResponse(32)**:ModelLength 处理"截断但有内容"(可审计的次优完成),Terminal 处理"真·空"(重试/兜底);反向分派 ModelLength 先 stamp,Terminal 后判空,互不冲突。
+- **与 TerminalResponse(36)**:ModelLength 处理"截断但有内容"(可审计的次优完成),Terminal 处理"真·空"(重试/兜底);反向分派 ModelLength 先 stamp,Terminal 后判空,互不冲突。
 - **同名闸门更窄**:`_has_tool_call_intent_or_error` 在此**不含** finish_reason 检查(长度信号本就来自 finish_reason,不能自指);Terminal 版含(要排除 tool_calls finish_reason)。
 
 ### 设计权衡
@@ -508,7 +508,7 @@ after_model(last)
 `model_length_finish_reason_middleware.py`(130 行):docstring(#4271)→ `_has_tool_call_intent_or_error`/`_has_visible_content`(与 terminal_response_middleware.py 同名函数对比)→ `_apply`(stamp 的"不覆盖"分支)。
 ---
 
-## 6. SafetyFinishReasonMiddleware——安全终止处理(链 34)
+## 6. SafetyFinishReasonMiddleware——安全终止处理(链 38)
 
 文件:`agents/middlewares/safety_finish_reason_middleware.py`(449 行)
 
@@ -519,7 +519,7 @@ provider 因**安全原因**中途终止(`finish_reason='content_filter'`、Anth
 ### 钩子与执行时机 / 链位置
 
 - 只实现 `after_model`/`aafter_model`。
-- 链位置 34,**可选**(`safety_finish_reason.enabled`,默认 true),注册在 TerminalResponse(32)/ModelLength(33)/custom(30)/configured-extensions(31) 之后——反向分派中**先于它们与 LoopDetection 看到原始模型输出**(模块 docstring 与 §0.3)。
+- 链位置 38,**可选**(`safety_finish_reason.enabled`,默认 true),注册在 TerminalResponse(36)/ModelLength(37)/custom(34)/configured-extensions(35) 之后——反向分派中**先于它们与 LoopDetection 看到原始模型输出**(模块 docstring 与 §0.3)。
 ### 内部实现逻辑
 
 **检测器**(`safety_termination_detectors.py`):
@@ -599,7 +599,7 @@ stamp safety_capped(runtime.context) + additional_kwargs.safety_termination
 
 ---
 
-## 7. ClarificationMiddleware——人机澄清(链 35,必须最后)
+## 7. ClarificationMiddleware——人机澄清(链 39,必须最后)
 
 文件:`agents/middlewares/clarification_middleware.py`(605 行)
 
@@ -611,7 +611,7 @@ stamp safety_capped(runtime.context) + additional_kwargs.safety_termination
 
 - `wrap_tool_call`/`awrap_tool_call`:在工具执行**之前**拦截 `ask_clarification`;非此工具直接透传 handler。
 - `after_model`/`aafter_model`:`_drop_parallel_non_clarification_tools`,丢掉同批 sibling 调用。
-- 链位置 35:**必须最后注册**——它在 wrap_tool_call 层短路工具执行(直接 `Command(goto=END)`,handler 不跑),任何后置层都破坏中断原子性;反向 after_model 分派中它**最先**看到原始响应、先剥 sibling(§0.3)。
+- 链位置 39:**必须最后注册**——它在 wrap_tool_call 层短路工具执行(直接 `Command(goto=END)`,handler 不跑),任何后置层都破坏中断原子性;反向 after_model 分派中它**最先**看到原始响应、先剥 sibling(§0.3)。
 ### 内部实现逻辑
 
 **step 0 —— after_model 剥 sibling**(`_drop_parallel_non_clarification_tools`):
@@ -714,19 +714,19 @@ wrap_tool_call(每个调用)
 
 ```
 模型响应 → after_model 反向分派(最后注册的先跑)
-35 Clarification  剥 sibling, 只留澄清 → (澄清则短路到 END 等用户)
-34 SafetyFinish    安全终止? 剥残缺 tool_calls / 回填空内容 → safety_capped
-33 ModelLength     长度截断且有内容? → 记 model_length_capped(不改写)
-32 TerminalResponse仍空终态? → 隐藏恢复提示重试一次 → 再空则 error fallback
-29 TokenBudget     超预算? → 剥调用终答 + token_capped
-28 LoopDetection   重复调用? → 剥调用终答 + loop_capped
-27 SubagentLimit   超额 task? → 截断 + subagent_limit_capped
+39 Clarification  剥 sibling, 只留澄清 → (澄清则短路到 END 等用户)
+38 SafetyFinish    安全终止? 剥残缺 tool_calls / 回填空内容 → safety_capped
+37 ModelLength     长度截断且有内容? → 记 model_length_capped(不改写)
+36 TerminalResponse仍空终态? → 隐藏恢复提示重试一次 → 再空则 error fallback
+33 TokenBudget     超预算? → 剥调用终答 + token_capped
+32 LoopDetection   重复调用? → 剥调用终答 + loop_capped
+31 SubagentLimit   超额 task? → 截断 + subagent_limit_capped
                       ↓ 正常路径
                    工具节点(wrap_tool_call) → ToolMessage → 下一轮模型调用
                       ↓ wrap_model_call(注册顺序)
                    注入本轮的 loop/budget/terminal 延迟警告(消息尾部, 配对完好)
 ```
 
-三个主动/语义守卫与兜底各管一个威胁面(§0.1);所有 capped 都落到加法 `stop_reason`(§0.4); 自定义与扩展中间件只能插在 30/31,收尾段 32–35 的顺序不可被扩展改写(§0.2–0.3)。 读源码时若困惑"为什么它在这里",回到 §0.3 的反向分派图——DeerFlow 中间件链的顺序不是装饰,它就是正确性本身。
+三个主动/语义守卫与兜底各管一个威胁面(§0.1);所有 capped 都落到加法 `stop_reason`(§0.4); 自定义与扩展中间件只能插在 34/35,收尾段 36–39 的顺序不可被扩展改写(§0.2–0.3)。 读源码时若困惑"为什么它在这里",回到 §0.3 的反向分派图——DeerFlow 中间件链的顺序不是装饰,它就是正确性本身。
 
 

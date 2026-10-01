@@ -1,14 +1,17 @@
 # 17 Gateway API 与 IM 渠道
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写。
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10,版本 2.2.0-dev)编写。
 >
 > 本章覆盖文件:`backend/app/gateway/app.py`、`routers/`(threads、thread_runs、runs、models、
-> console、channels、channel_connections、auth、mcp、memory、skills、agents、scheduled_tasks、
-> subagents、subagent_batches、uploads、artifacts、feedback 等)、`trace_middleware.py`、
+> managed_models、capabilities、console、channels、channel_connections、auth、user_preferences、
+> mcp、personal_mcp、knowledge、plugins、projects、project_documents、project_thread_files、trash、
+> memory、skills、agents、scheduled_tasks、subagents、subagent_batches、uploads、artifacts、feedback 等)、`trace_middleware.py`、
 > `auth_middleware.py`、`csrf_middleware.py`、`authz.py`、`auth/pat.py`、`internal_auth.py`、
 > `langgraph_auth.py`、`deps.py`、`services.py`、`backend/app/channels/`(manager、service、
-> message_bus、store、run_policy、base 及各平台实现)、`packages/harness/deerflow/client.py`、
-> `runtime/stream_bridge/`、`runtime/runs/worker.py`、`runtime/events/`、`docker/nginx/nginx.conf`。
+> message_bus、store、run_policy、base 及各平台实现)、`backend/app/scheduler/`(service、
+> notification_delivery)、`packages/harness/deerflow/persistence/notification_deliveries/`、
+> `packages/harness/deerflow/client.py`、`runtime/stream_bridge/`、`runtime/runs/worker.py`、
+> `runtime/events/`、`docker/nginx/nginx.conf`。
 > 素材书 coolclaws ch19(fastapi-gateway)+ ch20(im-channels),以当前代码为准校准。
 
 旧书里,"Gateway"是一层薄薄的 HTTP 胶水:后端照搬 LangGraph Platform 的 `langgraph-api`
@@ -128,19 +131,28 @@ worker,最后 `langgraph_runtime` 退出时 drain 在飞 run 与内存 flush—�
 | Router 模块 | 前缀 | 关键端点 |
 |---|---|---|
 | `models` | `/api/models` | `GET /` 列模型;`GET /{name}` 详情 |
+| `managed_models` | `/api/managed-models` | 部署级托管模型清单(admin 托管,与用户自配模型并列) |
+| `capabilities` | `/api/capabilities` | UI 能力开关投影(哪些功能对当前部署/用户可用) |
 | `features` | `/api/features` | `GET /` UI 能力开关 |
 | `console` | `/api/console` | `GET /stats` `/runs` `/usage` 跨线程只读运营数据 |
 | `mcp` | `/api/mcp` | `GET/PUT/PATCH /config`、`POST /config/servers`…(扩展配置热写) |
+| `personal_mcp` | `/api/mcp/personal/config` | 每用户个人 MCP 服务器配置(与全局 `mcp` 分开) |
 | `mcp_tasks` | `/api/threads/{id}/mcp-tasks` | durable MCP 任务查询/取消 |
 | `subagent_batches` | `/api/threads/{id}/subagent-batches` | batch 查询/暂停/续跑/取消/retry/results.jsonl |
 | `memory` | `/api/memory` | 全局记忆 CRUD + 搜索 |
 | `skills` | `/api/skills` | 列表/启停/安装(`/install/upload` admin-only,100MiB 上限)/reload |
 | `integrations` | `/api/integrations` | Lark/Feishu 托管 skill pack 安装与授权流转 |
+| `knowledge` | `/api/knowledge` | 知识库/数据集列表与检索面(承载 `knowledge_search` provider 的选择) |
 | `artifacts` | `/api/threads/{id}/artifacts` | 产物读取/改写/打包 |
 | `browser` | `/api/threads/{id}/browser` | 浏览器会话 + `ws /browser/stream` |
 | `uploads` | `/api/threads/{id}/uploads` | 多文件上传(含 limits/list/删除) |
 | `threads` | `/api/threads` | 见 §3.1 |
 | `scheduled_tasks` | `/api/scheduled-tasks` | 任务 CRUD/pause/resume/trigger/runs |
+| `projects` | `/api/projects` | 用户项目 CRUD:线程分组 + 自由 instructions(见 §3.5) |
+| `project_documents` | `/api/projects/{project_id}/documents` | 项目文档货架(上传/索引/回收进 trash) |
+| `project_thread_files` | `/api/projects/{project_id}/thread-files` | 项目名下线程文件清单 |
+| `trash` | `/api/trash` | 回收站:列出/恢复/清空(项目文档保留期见 `projects.trash_retention_days`) |
+| `plugins` | `/api/plugins` | 统一插件命名空间与后端 action 调用(`plugin_action` 授权) |
 | `agents` | `/api/agents` | 自定义 agent 管理 + `/api/agents.json` 类目录 |
 | `subagents` | `/api/subagents` | admin 托管 worker CRUD |
 | `suggestions` | `/api/threads/{id}/suggestions` | 追问建议 |
@@ -149,6 +161,7 @@ worker,最后 `langgraph_runtime` 退出时 drain 在飞 run 与内存 flush—�
 | `channels` | `/api/channels` | `GET /` 状态、`POST /{name}/restart` |
 | `assistants_compat` | `/api/assistants` | LangGraph Platform assistants 兼容 stub(search/get/graph/schemas) |
 | `auth` | `/api/v1/auth` | login/register/logout/me/pats/OIDC/setup |
+| `user_preferences` | `/api/v1/auth/preferences` | 每用户偏好设置 |
 | `feedback` | `/api/threads/{id}/runs/{rid}/feedback` | run 反馈 CRUD + stats |
 | `thread_runs` | `/api/threads` | LangGraph Platform 兼容 runs 生命周期(§3.2) |
 | `runs` | `/api/runs` | 无状态 runs:`POST /stream` `/wait`、`GET /{rid}/messages` |
@@ -230,6 +243,15 @@ LangGraph 兼容核心 + DeerFlow 扩展并存:
 按命中价计费(未配置命中价 → 按未命中价计,保守上界);多币种混用则禁用成本列,避免聚合出
 假数字。
 
+### 3.5 Projects(`projects.py` / `project_documents.py` / `project_thread_files.py` / `trash.py`)
+
+2.2.0 新增的"用户项目"把若干 thread 归到一个名下,并附带一段自由文本 instructions。核心语义(config `projects:` 段在 §A 附录给出:`instructions_max_bytes`、`shelf_index_max_entries`、`shelf_index_max_bytes`、`trash_retention_days`):
+
+- **集合面**:`POST /api/projects`(建)、`GET /api/projects`(列)、`GET/PATCH /api/projects/{id}`、`POST /{id}/archive|restore`、`DELETE /{id}`、`GET /{id}/threads`(项目内线程清单)。项目内线程另由 `project_thread_files` 路由暴露文件面。
+- **指令注入的"快照钉死"**:成员 thread 的每次 run 会收到项目**当前** instructions,但渲染成一个**请求作用域**的 `<project>` 块,来源是 **run 准入时刻钉死的快照**——该块**绝不进系统提示词、也绝不进持久历史**。超长 instructions 在写时直接拒绝(422)而非截断。
+- **文档货架**:`project_documents` 路由管理项目文档(上传、从 thread 转存 `POST /from-thread`、附着到 thread `POST /{id}/attach-to-thread/{thread_id}`、读内容、删除);运行时按同样的钉死快照把货架渲染成一个**请求作用域**的 `<documents>` 索引,条目数与字节数均受 `projects.shelf_index_*` 上限约束(CJK 文档名通常先撞字节上限)。
+- **回收站**:删除的项目文档进 trash(软删除),`trash` 路由列出 `/api/trash/documents`、恢复或永久清除(`/documents/{id}/restore|purge`),并在 `projects.trash_retention_days`(默认 30 天)后被保留期清理任务永久清掉。
+
 ---
 
 ## 4. 认证与授权
@@ -283,8 +305,7 @@ PAT 是 v1 唯一程序化凭据(`auth/pat.py`):
 async def get_thread(thread_id: str, request: Request): ...
 ```
 
-权限全集:`threads:read/write/delete`、`runs:create/read/cancel`(外加工具侧的
-`sandbox:execute` 与模型侧的 model 过滤,见 §3.3)。关键行为:
+权限全集:`threads:read/write/delete`、`runs:create/read/cancel`(外加工具侧的 `sandbox:execute`、模型侧的 `model:use`/`model:list` 过滤(见 §3.3)、技能侧的 `skill:list/use` 可见性过滤,以及插件侧的 `plugin_action`/`plugin_management`)。关键行为:
 
 - `owner_check=True`:除权限外还校验资源归属当前用户(thread 的 `metadata.user_id`),
   管理员也不跨用户。
@@ -579,6 +600,37 @@ agent_name)` 确定性线程)把每个绑定发一条 `InboundMessage` 进 `Mess
 log-only;注册在 `app.gateway.github.run_policy` 的 `ChannelRunPolicy` 配
 `fire_and_forget=True` + `buffer_followups_on_busy=True`。registry 缓存按 agent store 的
 不透明签名失效(文件存储看 mtime,DB 存储 hash owner/name/config/soul 内容)。
+
+### 10.6 出站媒体主机白名单(`allowed_media_hosts`)
+
+WeChat(iLink)与 WeCom 的**入站媒体**不是无脑下载:帧里携带的 `media.full_url` 必须通过
+**scheme + 点边界 host 后缀**白名单校验才会被拉取(`channels.wechat.allowed_media_hosts`
+默认放行 `qq.com` 家族加配置的 `cdn_base_url` 主机;WeCom 额外认可它自己的 COS 形状
+`ww-aibot-img-<APPID>.cos.<region>.myqcloud.com`,且数字后缀必须命中已核实的腾讯云账号
+APPID——因为 bucket 名用户可自选,别的腾讯云账号能注册外观相同的 bucket,其余账号要走
+operator 配置的 `channels.wecom.allowed_media_hosts` 后缀,运行时从活着的 channel 解析)。
+配套两条纪律:下载请求带 `Accept-Encoding: identity`,并在读 body 前拒绝任何残余
+`Content-Encoding`(httpx 的透明解码会先分配整个解压体再让字节上限看到);任何基于 URL 的
+入站媒体日志**不得包含 URL 任何部分**(签名链接把凭据放在 path/query)——失败标签只用附件
+文件名或 host,reader 失败只记类名加 HTTP 状态。
+
+### 10.7 定时任务结果的 IM 推送:通知出站(outbox)
+
+2.2.0 起,定时任务的运行结果可以推给 owner 已绑定的 IM 身份(当前是 WeCom 主动推送)。
+实现刻意把**执行状态**与**投递状态**分开(issue #4254):
+
+- **完成钩子只入队**:`ScheduledTaskService._enqueue_run_notifications` 在 run 完成时**只写
+  一条持久 outbox 行**(`notification_deliveries` 表,harness 的
+  `persistence/notification_deliveries/`),绝不在钩子里做 IM 发送。
+- **独立投递 worker 负责真正发送**:`backend/app/scheduler/notification_delivery.py` 的
+  worker 把 outbox 行推进 `pending → sending → sent|failed`,`mark_failed` 带退避重试。
+  它**绝不碰 run/task 行**:一次投递失败不改 run 结果,而 `(task_run_id, event, provider,
+  target)` 唯一约束保证重入的完成钩子不会重复通知。
+- **发送时点再校验绑定**:worker 在发送那一刻用 `ChannelConnectionRepository.list_connections`
+  确认目标 owner 的外部身份**仍然绑定**,否则丢弃该投递。
+- **由 `scheduler.poll_interval_seconds` 一并驱动**:与调度扫描同一节拍(见 §A.11),因此该
+  间隔同时决定 IM 出站投递的频率;需 `channel_connections.enabled=true` 且 IM 渠道在运行。
+  手动"run now"与中断**不发通知**(保持静默)。
 
 ---
 

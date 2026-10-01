@@ -1,6 +1,6 @@
 # 14 · MCP 集成与延迟工具路由
 
-> 基于 DeerFlow 最新源码（本仓库 commit 2672e209，2026-09）编写。
+> 基于 DeerFlow 最新源码（本仓库 commit 11b339d6，2026-10）编写。
 > 本章代码位于 `backend/packages/harness/deerflow/mcp/`、`config/extensions_config.py`、`tools/builtins/tool_search.py`
 > 与 `agents/middlewares/{mcp_routing,deferred_tool_filter}_middleware.py`，顶层配置文件为 `extensions_config.json`
 > （模板 `extensions_config.example.json`）。与旧书结构的关系：hawkli 第十一章（MCP Server 集成）+ coolclaws
@@ -15,8 +15,8 @@
 2. **接了之后怎么“省着用”**：MCP 服务器一多 schema 就爆炸——答案是**延迟工具路由**：
    默认不把 MCP 工具 schema 绑给模型，只在系统提示词里列名字
    （`<available-deferred-tools>`），模型想要哪个就调 `tool_search` 现场取回完整
-   schema；`McpRoutingMiddleware`（链 24）还能按用户话里的关键词**自动提升**（promote）
-   最相关的 top_k 个；`DeferredToolFilterMiddleware`（链 25）负责在所有提升发生**之前**
+   schema；`McpRoutingMiddleware`（链 27）还能按用户话里的关键词**自动提升**（promote）
+   最相关的 top_k 个；`DeferredToolFilterMiddleware`（链 29）负责在所有提升发生**之前**
    把未提升的 schema 从模型绑定里藏掉（§5——本章核心）。末尾两节是 `mcp_tasks`
    持久化运行时（§7）与安全模型（§8）。
 
@@ -25,7 +25,7 @@
 > MCP 是“工具即子进程/远端服务”的生态接入协议；DeerFlow 把每个 server 的每个工具
 > 变成一个 LangChain `BaseTool`，再按 `tool_search.enabled` 决定是**全量绑给模型**
 > 还是**延迟到按需提升**。延迟路径上，“哪些 schema 模型可见”完全由线程状态里的
-> `promoted`（带 `catalog_hash` 防漂移）决定，链 24 负责预判、链 25 负责执行隐藏。
+> `promoted`（带 `catalog_hash` 防漂移）决定，链 27 负责预判、链 29 负责执行隐藏。
 
 ---
 
@@ -120,7 +120,7 @@ sidecar 文件锁双重持有的 read-modify-write，经
 |---|---|---|
 | `enabled` | `true` | 是否启用 |
 | `type` | `"stdio"` | 传输：`stdio`/`sse`/`http`；也接受 MCP 官方 schema 的 `transport` 别名（两者并存时 `type` 优先，见 `normalize_mcp_transport_alias`） |
-| `command`/`args`/`env` | — | stdio 专用：子进程命令、参数、环境 |
+| `command`/`args`/`cwd`/`env` | — | stdio 专用：子进程命令、参数、工作目录、环境（`cwd` 默认空，由会话池钉到线程工作区，§4.2） |
 | `url`/`headers` | — | sse/http 专用：端点与静态头 |
 | `oauth` | `null` | sse/http：令牌端点流（`client_credentials`/`refresh_token`），自动刷新 |
 | `user_auth` | `null` | sse/http：DeerFlow 用户 id → 凭据头值映射 |
@@ -149,18 +149,28 @@ h11 把完整头值渲染进模型可见的异常（§8）。其它 transport �
 失败只丢自己（log error），不拖垮其它 server——单点故障隔离原则贯穿整个
 MCP 子系统。
 
-### 2.4 加载与缓存：懒初始化 + 内容签名失效
+### 2.4 加载与缓存：懒初始化 + 两段式失效
 
 `mcp/cache.py` 维护进程级工具缓存：
 
 - **懒初始化**：`get_cached_mcp_tools()` 首次调用（或陈旧后）才真正
   `get_mcp_tools()`；已在运行的事件循环里则另起线程跑 `asyncio.run`
   （兼容 LangGraph Studio 等无启动钩子的场景）。
-- **失效不是比 mtime**：缓存记录“解析出的配置路径 + `(mtime, size, sha256)`
-  内容签名”（`config/file_signature.py`，与主 `config.yaml` 共用同一 helper），
-  用**内容相等性**而非 mtime `>` 比较——覆盖同秒编辑、mtime 回退（git checkout、
-  `cp -p`、对象存储/网络挂载）与配置文件切换；Gateway 另一进程写盘后，多 worker
-  部署也能在下一次调用感知并重建。
+- **失效是两段式，不是单纯比 mtime**：第一段是变更**信号**——缓存记录“解析出的
+  配置路径 + `(mtime, size, sha256)` 内容签名”（`config/file_signature.py`，与主
+  `config.yaml` 共用同一 helper），用**内容相等性**而非 mtime `>` 比较（覆盖同秒
+  编辑、mtime 回退、对象存储/网络挂载、配置文件切换），另有一个独立于文件字节的
+  **共享 reset 标记**；第二段才是**裁决**——签名/标记只是“值得重读”的信号，真正
+  决定是否重建的是把新旧配置各自归一化后算出的**有效 MCP 切片快照**（
+  `_effective_mcp_config_snapshot`：enabled server 列表保序 + 归一化后的
+  `mcpInterceptors`）是否相等。因此只改技能/中间件设置、或切到一个 MCP 配置
+  相同的文件，都**不会**触发无谓重建；每个 server 的 `type`/`transport` 等价拼写
+  经 `config_normalization` 归一，不制造假差异。
+- **管理员级 reset**：`POST /api/mcp/cache/reset` 走
+  `publish_mcp_tools_cache_reset()`，原子写一个带随机 generation 的共享标记
+  （与 `extensions_config.json` 同目录），即使配置文件本身没变，也要让**每个**
+  worker 在下一次调用退休会话并重建——典型场景是远端 MCP server 改了
+  `tools/list` 却没改配置；无共享目录时退化为进程本地 reset。
 - 重置缓存时同步关闭会话池（`close_all_sync`），子进程与连接随旧配置回收。
 
 `get_mcp_tools()`（`mcp/tools.py`）是整条加载链的主体：
@@ -175,6 +185,30 @@ MCP 子系统。
 5. 对所有产出的工具统一做**边界校验与打 tag**（§3.3），stdio 的包一层
    会话池包装（§4），最后给没有同步入口的工具补 `make_sync_tool_wrapper`
    （DeerFlowClient 同步流需要）。
+
+### 2.5 个人 MCP 连接（per-user，与部署配置分离）
+
+除 operator 在 `extensions_config.json` 里声明的**部署级** server 外，还有一套
+**个人 MCP 连接**子系统，落在用户自己的目录、绝不进全局缓存：
+
+- **存储与加载**（`mcp/user_config.py`）：个人连接存
+  `users/{user_id}/integrations/mcp.json`（与技能、账户集成同一个校验过的用户根），
+  server 名带 `personal_` 前缀；`load_user_mcp_config` /
+  `load_user_mcp_config_if_changed` 走文件签名，改动即时感知。
+- **只加载调用方自己的工具**（`mcp/user_tools.py`）：
+  `get_mcp_tools(..., personal_user_id=...)` 时把该用户**授权后**的个人配置合进来，
+  产出的工具只属于该用户、**不进进程级工具缓存**；每个个人工具被 `_guard` 包一层，
+  调用前重读一次配置，server 被禁用/改动即失效。
+- **权限闸门**（`mcp/personal_access.py`）：带 admin 特权保存的个人连接由宿主经
+  `set_personal_mcp_admin_checker` 提供的**实时**权限查询裁决；缺
+  `personal_public_network` 标记（含旧个人文件）一律按"需要管理员"处理。
+- **公网策略**（`mcp/personal_network.py`）：非 operator 的个人 HTTP(S) MCP 连接
+  必须指向**公网**端点；私网/loopback/link-local 等地址在连接前就被拒
+  （`validate_public_http_url` 复用 community 的 SSRF 守卫）。
+
+持久任务侧对应一个 `connection_scope`（`task_tool_caller.py`，§7）：`"deployment"`
+用部署配置，`"personal"` 用某用户的个人配置，且**随任务行一起持久化**——任务在发起
+它的 run 结束之后重连，仍用同一份作用域。
 
 ---
 
@@ -228,7 +262,9 @@ MCP 子系统。
 
 适配器默认每次调用新建会话——对 Playwright 这类有状态 server 意味着浏览器
 状态（开过的页、填过的表单）随调用结束蒸发。`session_pool.py` 维护
-`(server_name, scope_key)` 键控的持久会话池。比“要不要池”更硬的约束是
+`(server_name, scope_key, owning_loop)` 三元键控的持久会话池：同一 loop 上的连续
+调用共享服务端状态，独立 loop（如每次调用开新 `asyncio.run` 的同步包装路径）各用
+各的会话，池满按 LRU 逐出。比“要不要池”更硬的约束是
 **生命周期纪律**：MCP `ClientSession` 基于 anyio task group，取消作用域必须在
 **进入它的同一个 task** 退出，否则 `RuntimeError: Attempted to exit cancel
 scope in a different task`；同步包装路径（`make_sync_tool_wrapper`）每次调用
@@ -237,11 +273,24 @@ scope in a different task`；同步包装路径（`make_sync_tool_wrapper`）每
 等 close 事件；所有关闭路径只**发信号**，`__aexit__` 永远由 owner task 执行，
 池满按 LRU 逐出。
 
-### 4.2 scope = (server, user:thread)，cwd/TMPDIR 钉进线程工作区
+### 4.2 scope = (server, user:thread,incarnation)，cwd/TMPDIR 钉进线程工作区
 
-池键不是裸 thread_id：`scope_key = f"{user_id}:{thread_id}"`——文件系统隔离是
-按 `(user_id, thread_id)` 的，两个用户若线程 id 碰撞，裸 thread_id 会让它们
-共享一个有状态会话（跨用户状态泄露）。
+池键不是裸 thread_id：`scope_key` 由 `mcp_session_scope_key`（`deerflow.mcp_scope`）
+构造——文件系统隔离是按 `(user_id, thread_id)` 的，两个用户若线程 id 碰撞，裸
+thread_id 会让它们共享一个有状态会话（跨用户状态泄露）。作用域现在是**带代际
+（incarnation）的版本化编码**：
+
+```python
+# 无代际（旧）：               "user_id:thread_id"                —— 前缀无别，向后兼容
+# 有代际（新，v2）：            "v2:" + json([user_id, thread_id, thread_incarnation])
+```
+
+线程的代际由服务端在 `ToolRuntime.context` 里写入（`runtime_thread_incarnation`），
+只有当宿主带 `THREAD_INCARNATION_METADATA_GUARD_KEY` 时还会与 checkpoint metadata
+交叉校验，防止把一个已失效（被新代际替换）的会话复活。版本化的 JSON 元组编码
+即使 `user_id`/`thread_id` 里含分隔符也不会误拼；`mcp_scope_belongs_to_thread`
+同时认旧/新两种编码，撕掉整个线程时按 user+thread（**忽略代际**）把所有代际的会话
+一起清掉——`MCPSessionPool.close_thread_scope(user_id=..., thread_id=...)` 正是它。
 
 stdio 子进程额外做两件钉扎（http/sse 无本地文件系统，整段跳过）：
 
@@ -258,9 +307,10 @@ stdio 子进程额外做两件钉扎（http/sse 无本地文件系统，整段�
 
 ### 4.3 断线恢复与超时
 
-收到 MCP SDK 显式 `Connection closed` 或 anyio 关闭流错误时，只逐出
-`(server_name, user_id:thread_id)` 这一个会话——且仅当池里注册的还是**失败的
-那个 ClientSession**（旧并发调用的迟到错误不能逐出新替身）；失败调用照常报错、
+收到 MCP SDK 显式 `Connection closed` 或 anyio 关闭流错误时，只逐出该
+`(server_name, scope_key)` 在**当前 loop** 上注册的那一个会话
+（`close_session_if_current`）——且仅当池里注册的还是**失败的那个 ClientSession**
+（旧并发调用的迟到错误不能逐出新替身）；失败调用照常报错、
 不自动重放，下次重试自然新建子进程。协议超时、`isError=true` 结果、拦截器失败
 都不驱逐健康会话。初始化超时（`session_init_timeout`，默认 60s）由
 `asyncio.wait_for` 包住 `pool.get_session`，超时走 owner task 清理路径，不留
@@ -294,10 +344,10 @@ deferred 工具**留在 ToolNode 但被摘出模型绑定**。系统提示词渲
 `<available-deferred-tools>`：一行一个、HTML 转义的名字——名字来自外部
 server，转义防止伪造名字闭合标签冒充框架结构。
 
-### 5.2 链 25 · DeferredToolFilterMiddleware：隐藏的执行者
+### 5.2 链 29 · DeferredToolFilterMiddleware：隐藏的执行者
 
-`agents/middlewares/deferred_tool_filter_middleware.py`——全链第 **25** 位
-（lead-only 段，紧随链 24）。它构造时只收 `(deferred_names, catalog_hash)`
+`agents/middlewares/deferred_tool_filter_middleware.py`——全链第 **29** 位
+（lead-only 段，紧随链 27）。它构造时只收 `(deferred_names, catalog_hash)`
 （build 期闭包，无 ContextVar），每次模型调用从**图状态**读提升记录：
 
 ```python
@@ -334,11 +384,11 @@ def _hidden(self, state) -> set[str]:
 - **`catalog_hash` 变了 → 整体替换、丢弃旧 names**——防的正是漂移：线程
   checkpoint 里持久着一个旧目录的裸名，若目录（工具增删/改名/schema 变了）
   漂移后仍按名放行，会暴露一个语义完全不同的工具；
-- hash 相同 → 名字**并集去重保序**（`tool_search` 的多轮累积与链 24 的
+- hash 相同 → 名字**并集去重保序**（`tool_search` 的多轮累积与链 27 的
   自动提升可以叠加）。
 
 提升记录落在图状态、随 checkpoint 跨轮持久——状态可能比工具目录活得久，
-所以必须带 hash scope；链 25 的 `_promoted` 与 reducer 用的是**同一把钥匙**
+所以必须带 hash scope；链 29 的 `_promoted` 与 reducer 用的是**同一把钥匙**
 （构造期 catalog_hash == 状态里 catalog_hash）。
 
 ### 5.4 tool_search 工具本体：查询语法与 Command 提升
@@ -358,7 +408,7 @@ JSON）进 ToolMessage 作为搜索结果；命中名单写进 `promoted:{catalo
 状态更新。模型读 schema、下一轮即可调用；未命中返回 `No tools found matching:...`
 且 names 为空（空 names 在 `merge_promoted` 里视为“没动”，不清既有提升）。
 
-### 5.5 链 24 · McpRoutingMiddleware：意图匹配自动提升
+### 5.5 链 27 · McpRoutingMiddleware：意图匹配自动提升
 
 延迟解决了 token 账，却把负担推给模型：它得记得先 `tool_search` 再调用。
 PR1（路由提示）让提示词出现 `<mcp_routing_hints>`（渲染于 `lead_agent/prompt.py`）：
@@ -366,7 +416,7 @@ PR1（路由提示）让提示词出现 `<mcp_routing_hints>`（渲染于 `lead_
 文案明确写“use `tool_search` to fetch `X`, then prefer that MCP tool”——不让
 模型直接调一个 schema 已被藏掉的工具。
 
-PR2 更进一步——`agents/middlewares/mcp_routing_middleware.py`（链 **24**，
+PR2 更进一步——`agents/middlewares/mcp_routing_middleware.py`（链 **27**，
 `tool_search.enabled` 且路由索引非空时安装，由
 `tool_search.build_mcp_routing_middleware` 构建），在 `before_model` 里**替模型
 做预判**：
@@ -382,30 +432,30 @@ return [name for _, name in matched[: self._top_k]]
 关键约束（docstring 与注释逐条钉死）：
 
 - 只匹配**最新一条真实 HumanMessage**（净化前原文，排除工具结果回填的伪用户消息）；
-- 命中即写 `promoted` 状态更新、交给链 25 生效；**不持有工具对象、不执行工具、
+- 命中即写 `promoted` 状态更新、交给链 29 生效；**不持有工具对象、不执行工具、
   不过滤调用**——职责只有“写最小提升状态”；
 - 数量上限走全局 `tool_search.auto_promote_top_k`（默认 3，钳制 1..5）；
 - 构造时只收**序列化扁平路由索引**且 `_normalize_index` 防御性重解析——构建器
   可摸 `BaseTool.metadata`，运行时中间件永远不碰工具对象；
-- **顺序不变量**：`assert_mcp_routing_before_deferred_filter` 装配期断言链 24
-  先于链 25——自动提升若跑在 schema 过滤之后，这轮就用不上，白提升。
+- **顺序不变量**：`assert_mcp_routing_before_deferred_filter` 装配期断言链 27
+  先于链 29——自动提升若跑在 schema 过滤之后，这轮就用不上，白提升。
 
-链 24/25 在**子代理**同样装配（`build_subagent_runtime_middlewares` +
+链 27/29 在**子代理**同样装配（`build_subagent_runtime_middlewares` +
 `SubagentExecutor`），只是 deferred 集是启动期技能策略过滤后的子集，各自
 catalog/hash 独立。
 
 ### 5.6 一次完整的时间线
 
-把链 24/25、tool_search 与状态 reducer 串起来（`tool_search.enabled=true`、
+把链 27/29、tool_search 与状态 reducer 串起来（`tool_search.enabled=true`、
 有 `routing.mode="prefer"` 的 server、用户说“帮我查一下订单表”）：
 
 ```
 用户: 查一下订单表
- ├─ before_model 链24: 路由索引命中 postgres_query("订单表") → 写 promoted
+ ├─ before_model 链27: 路由索引命中 postgres_query("订单表") → 写 promoted
  │    {hash, names:[postgres_query]} → merge_promoted: hash 一致则并集
- ├─ wrap_model_call 链25: hidden = deferred − promoted = ∅ → schema 全放行
+ ├─ wrap_model_call 链29: hidden = deferred − promoted = ∅ → schema 全放行
  ├─ 模型调用 postgres_query(...)
- ├─ 模型想用另一个未提升的 github_* → wrap_tool_call 链25: 返回
+ ├─ 模型想用另一个未提升的 github_* → wrap_tool_call 链29: 返回
  │    "deferred and has not been promoted yet" error ToolMessage
  ├─ 模型: tool_search("+github repo") → ToolMessage 载完整 schema
  │    + Command 写 promoted {hash, names:[github_*]} → 下一轮 bind 可见
@@ -487,9 +537,11 @@ background task…”，调用后**只回本地 `task_id`**（远端句柄由服
 `running`→`working`；`error_code=task_not_found` 或畸形结构 = 永久失败；
 `isError=true` 的状态调用是**可重试**的调用失败（首段文本留作有界诊断），
 真正的远端失败必须出现在正常结果里。`task_tool_caller.py` 为 stdio 恢复
-`(server_name, user_id:thread_id)` 会话作用域；http/sse 调用保持临时，
-初始化走 `session_init_timeout`、任务调用走 `tool_call_timeout`，支持在
-Agent run 之外做 server 级 OAuth 刷新。
+**版本化的** `(server_name, scope_key)` 会话作用域（`scope_key` 由
+`mcp_session_scope_key` 按 user/thread/incarnation 构造，§4.2），并按
+`connection_scope`（`"deployment"` / `"personal"`，随任务行一起持久化，§2.5）挑
+部署配置或某用户的个人配置；http/sse 调用保持临时，初始化走 `session_init_timeout`、
+任务调用走 `tool_call_timeout`，支持在 Agent run 之外做 server 级 OAuth 刷新。
 
 ### 7.3 通知：幂等 run + dead-letter
 
@@ -536,10 +588,11 @@ Agent run 之外做 server 级 OAuth 刷新。
 - 配置与加载：`extensions_config.json` → `config/extensions_config.py` →
   `mcp/{client,cache,tools}.py`；热更新靠“路径+内容签名”失效、单 server 故障隔离。
 - 命名：`tool_name_prefix` 防碰撞只是展示层，来源路由永远按产出 server；有状态
-  靠 stdio 会话池（scope=(server, user:thread)、owner-task 生命周期、
-  cwd/TMPDIR 钉进线程工作区）。
-- **延迟路由**：`tool_search.enabled` → 链 24 预判提升（意图匹配 top_k）→
-  链 25 执行隐藏（未提升 schema 不绑、直接调用被拦）；`promoted` 带
+  靠 stdio 会话池（`scope=(server, user:thread,incarnation)` 且按 owning_loop 分桶、
+  owner-task 生命周期、cwd/TMPDIR 钉进线程工作区）。个人 MCP 连接另走 per-user
+  存储与公网策略，绝不进全局缓存（§2.5）。
+- **延迟路由**：`tool_search.enabled` → 链 27 预判提升（意图匹配 top_k）→
+  链 29 执行隐藏（未提升 schema 不绑、直接调用被拦）；`promoted` 带
   `catalog_hash` 防漂移。链位全景见第 06 章；子代理侧挂同名镜像（各自 hash）。
 - 长任务与安全：`mcp_tasks` 独立持久运行时（租约/幂等通知/dead-letter）；
   信任边界始终是 operator 配置与管理员身份。

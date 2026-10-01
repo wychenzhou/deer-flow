@@ -1,6 +1,6 @@
 # 15 · Skills 体系:扩展单元、激活与授权边界
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10)编写
 > 对应源码:`backend/packages/harness/deerflow/skills/`(解析/加载/策略/扫描)、
 > `agents/middlewares/skill_activation_middleware.py`、`skill_tool_policy_middleware.py`、
 > `skill_context.py`、`agents/lead_agent/prompt.py`(提示词渲染)、仓库根 `skills/`(内置技能)
@@ -15,8 +15,8 @@ Skill**(§7 实战)。安全扫描(§6)横切在"写入"与"激活"之间。
 
 > **Skill = 一个目录 + 一份 `SKILL.md`**。目录是包边界(嵌套 SKILL.md 不算数);
 > "启用"只让它进入发现列表,**不授予任何权力**;权力来自两条激活路径——用户显式
-> 敲 `/skill-name`(链位 15 注入正文),或模型自主 `read_file` 加载(SKILL.md 引用被
-> 捕获进 `ThreadState.skill_context`)——且只在激活后,链位 16 才把该 Skill
+> 敲 `/skill-name`(链位 18 注入正文),或模型自主 `read_file` 加载(SKILL.md 引用被
+> 捕获进 `ThreadState.skill_context`)——且只在激活后,链位 19 才把该 Skill
 > frontmatter 里 `allowed-tools` 的**声明**当作工具集的**上限**去执行。声明即上限、
 > slash 优先、注册表解析失败即 fail-closed。
 
@@ -49,7 +49,7 @@ Skill(详见 §6.2 容错)。
 
 ### 1.2 frontmatter 字段:哪些必需、哪些可选、哪些放行
 
-运行时解析器真正消费的字段只有 7 个,其余是"白名单放行、留给创作工具与演进特性"
+运行时解析器真正消费的字段只有 6 个,其余是"白名单放行、留给创作工具与演进特性"
 的兼容键。安装/校验器(`skills/validation.py`)维护一份**允许键全集**
 (`skills/frontmatter.py::ALLOWED_FRONTMATTER_PROPERTIES`),出现白名单外的键,
 运行时加载不报错,但 **install 通道直接拒绝**:
@@ -107,7 +107,7 @@ allowed-tools:
 
 ### 1.4 正文:指令即上下文,渐进披露
 
-正文是模型被激活后**逐字注入**的指令(链位 15),不是被"参考"。因此写作约定围绕
+正文是模型被激活后**逐字注入**的指令(链位 18),不是被"参考"。因此写作约定围绕
 "少而准"展开(详见内置 `skills/public/skill-creator/`,它是全仓库关于"怎么写
 Skill"的权威工作流):
 
@@ -245,10 +245,14 @@ frontmatter**——public/集成类读 `extensions_config.json` 的 `skills` 段
 索引 `<skill_index>`,模型要先用 `describe_skill` 工具取元数据、再决定 read_file。
 支撑模块:
 
-- `skills/catalog.py::SkillCatalog`——不可变、可搜索;三种查询形态(与
-  `DeferredToolCatalog` 镜像):`select:a,b`(精确点名、无上限)、`+req`(名字必须
-  含 req,再按剩余词打分)、自由文本(对 name+description 做不区分大小写正则,
-  名字命中权重 2)。除 `select:` 外上限 `MAX_RESULTS = 5`;非法正则降级为字面匹配。
+- `skills/catalog.py::SkillCatalog`——不可变、可搜索;三种查询形态(查询语法与
+  `DeferredToolCatalog` 共享,但**排序语义不同**——技能用**字面意图词**排名,而非
+  工具目录的自由文本正则):`select:a,b`(精确点名、无长度/结果上限)、`+req`
+  (名字必须含 req,再按剩余词打分)、自由文本**字面意图匹配**(把查询切成一组
+  **有界**的意图词 `_query_terms`,对 name+description 逐词命中计数打分;文本先做
+  NFKC 归一 + 分隔符感知,非 ASCII 单字符词保留以支持 C++/R 之类)。自由文本与
+  `+req` 的查询都截到 `MAX_QUERY_CHARS = 256`、取至多 `MAX_QUERY_TERMS = 16` 个词、
+  返回至多 `MAX_RESULTS = 5` 条;`select:` 不受这些上限约束。
 - `skills/describe.py::build_describe_skill_tool(catalog)`——把 catalog 闭包成
   `describe_skill` 工具;`build_skill_search_setup` 把它与 `skill_names` 一起接入
   LangGraph agent 工厂与嵌入式 client。
@@ -270,7 +274,7 @@ frontmatter**——public/集成类读 `extensions_config.json` 的 `skills` 段
 
 ---
 
-## 4. 激活:显式斜杠(链位 15)与自主加载
+## 4. 激活:显式斜杠(链位 18)与自主加载
 
 激活是权力的起点。两条路径共用同一对中间件
 (`SkillActivationMiddleware` + `SkillToolPolicyMiddleware`,lead 与 subagent
@@ -284,21 +288,27 @@ frontmatter**——public/集成类读 `extensions_config.json` 的 `skills` 段
 
 ```python
 _SLASH_SKILL_RE = re.compile(r"^/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s+|$)")
-RESERVED_SLASH_SKILL_NAMES = {"bootstrap","goal","help","memory","models","new","status"}
+RESERVED_SLASH_SKILL_NAMES = frozenset(
+    {"agent", "bootstrap", "context", "goal", "help", "memory", "models", "new", "status"}
+)
+_CONTEXT_COMPACT_ARGUMENT = "compact"
 ```
 
 - 名字必须是 hyphen-case;`/foo` 后必须跟空白或行尾(紧贴任务文本视为未分隔);
 - 前导空白不匹配(整条消息会当作普通对话);
-- 保留命令(`/new`、`/help`、`/bootstrap`、`/status`、`/models`、`/memory`、`/goal`)
-  拥有前导斜杠,永远不会被当成技能激活;
+- 保留命令(`/new`、`/help`、`/bootstrap`、`/status`、`/models`、`/memory`、
+  `/goal`、`/agent`、`/context`)拥有前导斜杠,永远不会被当成技能激活;
+- **`/context` 有一处例外**:只有当它后面的文本**不是** `compact` 时才算保留命令
+  ——`/context compact` 归上下文的压缩命令,而 `/context <任务>` 仍按技能激活
+  解析,避免压缩命令与同名技能互相遮蔽;
 - 语法 + 保留词被前后端**双端固定**在契约文件 `contracts/slash_skill_contract.json`
   上,后端 `tests/test_slash_skill_contract.py` 与前端 `slash-contract.test.ts`
   共同钉死,任何一侧改语法都过不了 CI。
 
-### 4.2 SkillActivationMiddleware 全流程(链位 15)
+### 4.2 SkillActivationMiddleware 全流程(链位 18)
 
-链位 15 是全链 lead-only 追加段的第 2 位(链位图见第 6 章;前一位 14
-DynamicContext、后一位 16 SkillToolPolicy、17 DurableContext)。它是**包裹钩子**
+链位 18 是全链 lead-only 追加段的第 2 位(链位图见第 6 章;前一位 17
+DynamicContext、后一位 19 SkillToolPolicy、20 DurableContext)。它是**包裹钩子**
 (`wrap_model_call`/`awrap_model_call`),每次模型调用都走一遍 `_prepare_model_request`:
 
 1. **找目标**:从消息尾向前找"真实用户消息"(跳过带隐藏标记的中间产物;
@@ -333,7 +343,7 @@ InputSanitization 的净化视图同一类)。后果:
   带 owner token,归属 `secret_context` 的 REDACTED 键集),它跨 tool loop 存活,
   但随 run 结束而亡;新 slash 消息(新 id/新文本)自然产生新 run key,照常激活。
 
-这条铁律的另一半在工具策略侧:链位 16 必须读到"本 run 有 slash 激活"才能收权,
+这条铁律的另一半在工具策略侧:链位 19 必须读到"本 run 有 slash 激活"才能收权,
 它读的正是同一份 run context 里的 canonical 路径(见 §5.3 的签名决策)。
 
 ### 4.4 自主(in-context)激活:skill_context 捕获
@@ -342,7 +352,7 @@ InputSanitization 的净化视图同一类)。后果:
 
 1. **打标**:对技能根下 SKILL.md 的 `read_file` 调用,工具结果会携带
    `skill_context_entry` 元数据(path+截断 description,≤500 字符);
-2. **捕获**:链位 17 DurableContextMiddleware 在 summarization 压掉成对的
+2. **捕获**:链位 20 DurableContextMiddleware 在 summarization 压掉成对的
    tool-call/result 消息**之前**,用 `agents/middlewares/skill_context.py` 确定性
    地枚举这些读取(AI 的 read_file 调用 ↔ 成功 ToolMessage 一一配对、路径校验、
    错误结果不算),把 **name/path/description 引用**(不是正文!)写进
@@ -353,12 +363,12 @@ InputSanitization 的净化视图同一类)。后果:
    "Active skills(loaded earlier - re-read the file before applying its
    instructions)"提醒块——它只提醒"你之前读过这些",不重放正文。
 
-`skill_context` 是**持久状态**(落 checkpoint),与链位 15 的一次性注入形成对照:
+`skill_context` 是**持久状态**(落 checkpoint),与链位 18 的一次性注入形成对照:
 斜杠激活 = 本轮强绑定、正文只此一次;自主加载 = 跨轮弱引用、正文随时可重读。
 
 ---
 
-## 5. 授权边界:SkillToolPolicy 链位 16
+## 5. 授权边界:SkillToolPolicy 链位 19
 
 `SkillToolPolicyMiddleware` 回答一个问题:**激活之后,这个 Skill 能让模型用哪些
 工具?** 答案不是"全部",而是"frontmatter 声明的 allowed-tools ∪ 框架安全白名单"。
@@ -415,7 +425,7 @@ slash 激活后**再读别的 Skill 也不能把工具集扩宽**;只有不存�
 
 ### 5.4 边界与残余面(必须直说)
 
-链位 16 是**行为学收权,不是硬安全边界**:
+链位 19 是**行为学收权,不是硬安全边界**:
 
 - 模型可以用 `bash cat` 之类的旁路读文件——策略不捕获非 read_file 加载路径;
 - `skill_context` 有界,旧条目会被逐出,长对话里自主收权可能"漏";
@@ -439,7 +449,7 @@ Skill 脚本需要短期凭证(如 ERP token)时,frontmatter 声明
 环境(`env_policy.build_sandbox_env` 会把宿主 `*KEY*/*SECRET*/*TOKEN*/*PASS*/
 *CREDENTIAL*/*DSN*` 与连接串名字**全部剥掉**再进沙箱——Skill 想要就得声明)。
 
-绑定点在链位 15(`_resolve_secret_bindings`,每模型调用重算并整体替换):
+绑定点在链位 18(`_resolve_secret_bindings`,每模型调用重算并整体替换):
 slash 激活把**路径**写进 run context(不写声明、不写值),后续 tool loop 保持绑定,
 新激活覆盖;in-context 路径按 skill_context 引用逐调用复检 live registry
 (enabled × allowlist × `secrets-autonomous`,斜杠豁免该开关)。值只经
@@ -609,7 +619,28 @@ workspace——那是线程产物目录,新会话看不见,等于白写(系统�
 正式分发走 `POST /api/skills/install`(.skill 归档),public 提交走仓库 PR +
 `skills/public/skill-reviewer/` 评审与 CI waiver 流程。
 
-### 7.5 写完后自检清单
+### 7.5 导出自建技能:只读快照,不激活、不执行
+
+把自建(custom)技能**导出**成一个可分发归档,由 `skills/export.py` 负责
+(`build_skill_export` / `export_manifest`),API 契约两条:
+
+- `GET /api/skills/custom/{skill_name}/export-manifest`——预览要打包的条目清单,
+  返回一个内容 **revision**(`^[a-f0-9]{64}$`),供下载时对账;
+- `GET /api/skills/custom/{skill_name}/export`——按 `expected_revision` 下载
+  `.skill` ZIP;两次读取之间技能被改动,revision 不匹配即拒绝,避免导出一个撕裂的
+  快照。
+
+安全边界刻意收紧:导出**只做只读快照,绝不激活或执行**被导技能(不绑密钥、不套
+tool-policy);打包有硬上限(`MAX_ENTRIES=4096`、单文件 64 MiB、总量/ZIP 各
+100 MiB、路径深度 32、frontmatter 1 MiB、整体 60s 期限);**敏感文件永不入包**
+(`.env`、`.npmrc`、`.pypirc`、`.netrc`、`.git*`、`credentials.json`、`id_rsa`/
+`id_ed25519` 等),并拒绝 Windows 保留名(`con`/`prn`/`aux`/`nul`/`com1..9`/
+`lpt1..9`)与非规范路径。旁的 `skills/package_files.py` 供打包路径/执行位判定
+(如 `is_executable_binary_prefix`),`skills/container_registry.py` 把容器
+SKILL.md 路径映射回 live registry 的规范技能名(供授权层按"声明的 name"而非
+目录名裁决)。
+
+### 7.6 写完后自检清单
 
 1. `name` hyphen-case ≤64、与目录名一致;`description` ≤1024、无尖括号、写全
    触发时机;多余字段只从白名单取(§1.2);
@@ -632,9 +663,9 @@ workspace——那是线程产物目录,新会话看不见,等于白写(系统�
 | Skill 的单元形态? | 目录 + `SKILL.md`(frontmatter+正文);旧 `skill.yaml` 作废 |
 | 目录即什么? | **包边界**:嵌套 SKILL.md 不注册;同一名 custom 遮蔽 public |
 | 启用 = ? | 只是可发现。权力 = 激活才给(声明即上限) |
-| 显式激活? | 链位 15,`/skill-name task` 严格语法;正文注入一次、不落 checkpoint、run 内保持绑定 |
-| 自主激活? | 模型 read_file SKILL.md → 链位 17 捕获进 `skill_context`(引用非正文,有界,可逐出) |
-| 收权? | 链位 16:slash 优先;无 slash 时 skill_context union;`task` 不豁免;注册表失败 fail-closed |
+| 显式激活? | 链位 18,`/skill-name task` 严格语法;正文注入一次、不落 checkpoint、run 内保持绑定 |
+| 自主激活? | 模型 read_file SKILL.md → 链位 20 捕获进 `skill_context`(引用非正文,有界,可逐出) |
+| 收权? | 链位 19:slash 优先;无 slash 时 skill_context union;`task` 不豁免;注册表失败 fail-closed |
 | 常驻工具? | `describe_skill`/`read_file`/`review_skill_package`/`tool_search`(发现可越,执行不越) |
 | 密钥? | 三闸门:enabled × 请求供值 × frontmatter 声明;只进子进程 env;prompt/checkpoint/审计无值 |
 | 写入安全? | SkillScan(确定性 CRITICAL 即 block)→ LLM 语义扫描;坏 frontmatter 丢单不炸全 |

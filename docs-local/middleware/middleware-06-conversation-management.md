@@ -1,4 +1,4 @@
-# 对话管理中间件：压缩 · 待办 · token 归因 · 标题 · 记忆（链位 18、19、20、21、22）
+# 对话管理中间件：压缩 · 待办 · token 归因 · 标题 · 记忆（链位 21、22、23、24、25）
 
 > 本篇讲解负责「对话生命周期管理」的五款中间件：上下文压缩、待办追踪、token 归因、标题生成、记忆入队。它们都长在 lead-only 追加段，共同前提是用同一套「真实用户消息」身份排除框架噪音。阅读前提：LangChain `AgentMiddleware` 钩子模型（`before_model`/`after_model`/`wrap_model_call`、`jump_to`）、LangGraph checkpoint 与消息 reducer、以及 `docs-local/harness-strategies-agent-execution.md` 第 2/5/7 节的概念。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
@@ -7,43 +7,43 @@
 
 | 链位 | 类 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 18 | `DeerFlowSummarizationMiddleware` | 上下文逼近上限时把早期消息压缩成摘要 | `before_model` | `summarization.enabled`（默认关） |
-| 19 | `TodoMiddleware` | 维护待办清单，防压缩丢待办、防带未完成待办草草收场 | `before_model`/`after_model`/`wrap_model_call` | `is_plan_mode` |
-| 20 | `TokenUsageMiddleware` | 记录每次模型调用用量，子代理用量归因到派发它的 AI 消息 | `after_model` | `token_usage.enabled` |
-| 21 | `TitleMiddleware` | 首轮完整交换后自动给 thread 起标题 | `after_model` | 恒装配（生成时按 `title.enabled` 判定） |
-| 22 | `MemoryMiddleware` | 整轮结束后把原始消息投进记忆队列（异步提取） | `after_agent` | 非 tool-mode；tool-mode 仅当后端要求被动写入 |
+| 21 | `DeerFlowSummarizationMiddleware` | 上下文逼近上限时把早期消息压缩成摘要 | `before_model` | `summarization.enabled`（默认关） |
+| 22 | `TodoMiddleware` | 维护待办清单，防压缩丢待办、防带未完成待办草草收场 | `before_model`/`after_model`/`wrap_model_call` | `is_plan_mode` |
+| 23 | `TokenUsageMiddleware` | 记录每次模型调用用量，子代理用量归因到派发它的 AI 消息 | `after_model` | `token_usage.enabled` |
+| 24 | `TitleMiddleware` | 首轮完整交换后自动给 thread 起标题 | `after_model` | 恒装配（生成时按 `title.enabled` 判定） |
+| 25 | `MemoryMiddleware` | 整轮结束后把原始消息投进记忆队列（异步提取） | `after_agent` | 非 tool-mode；tool-mode 仅当后端要求被动写入 |
 
 ---
 
 ## 0. 总览：五款中间件在链上的位置与分工
 
-主 Agent 链 = 共享运行时底座（链位 1–13）+ lead-only 追加段（`build_middlewares`）。本文五款都在追加段：
+主 Agent 链 = 共享运行时底座（链位 1–16）+ lead-only 追加段（`build_middlewares`）。本文五款都在追加段：
 
 | 链位 | 类 | 装配条件 | 一句话职责 |
 |---|---|---|---|
-| 18 | `DeerFlowSummarizationMiddleware` | 可选：`summarization.enabled` | 上下文逼近上限时把早期消息压成摘要，保住最新用户请求 |
-| 19 | `TodoMiddleware` | 可选：runtime `is_plan_mode` | 维护待办清单，防压缩丢待办、防带未完成待办草草收场 |
-| 20 | `TokenUsageMiddleware` | 可选：`token_usage.enabled` | 记录每次模型调用用量，把子代理用量归因到派发它的 AI 消息 |
-| 21 | `TitleMiddleware` | 恒装配（生成时再按 `title.enabled` 判定） | 首轮完整交换后自动给 thread 起标题 |
-| 22 | `MemoryMiddleware` | 非 tool-mode；tool-mode 仅当后端要求被动写入 | 整轮结束后把原始消息投进记忆队列（异步提取） |
+| 21 | `DeerFlowSummarizationMiddleware` | 可选：`summarization.enabled` | 上下文逼近上限时把早期消息压成摘要，保住最新用户请求 |
+| 22 | `TodoMiddleware` | 可选：runtime `is_plan_mode` | 维护待办清单，防压缩丢待办、防带未完成待办草草收场 |
+| 23 | `TokenUsageMiddleware` | 可选：`token_usage.enabled` | 记录每次模型调用用量，把子代理用量归因到派发它的 AI 消息 |
+| 24 | `TitleMiddleware` | 恒装配（生成时再按 `title.enabled` 判定） | 首轮完整交换后自动给 thread 起标题 |
+| 25 | `MemoryMiddleware` | 非 tool-mode；tool-mode 仅当后端要求被动写入 | 整轮结束后把原始消息投进记忆队列（异步提取） |
 
-装配代码（`lead_agent/agent.py::build_middlewares`，约 569–607 行）：
+装配代码（`lead_agent/agent.py::build_middlewares`，约 639–691 行）：
 
 ```python
-summarization_middleware = _create_summarization_middleware(...)      # 18
+summarization_middleware = _create_summarization_middleware(...)      # 21
 if summarization_middleware is not None: middlewares.append(summarization_middleware)
-if _get_runtime_config(config).get("is_plan_mode"):                   # 19 plan mode 才装
+if _get_runtime_config(config).get("is_plan_mode"):                   # 22 plan mode 才装
     middlewares.append(_create_todo_list_middleware(True))
-if resolved_app_config.token_usage.enabled: middlewares.append(TokenUsageMiddleware())   # 20
-middlewares.append(TitleMiddleware(app_config=..., extensions=...))   # 21
+if resolved_app_config.token_usage.enabled: middlewares.append(TokenUsageMiddleware())   # 23
+middlewares.append(TitleMiddleware(app_config=..., extensions=...))   # 24
 if should_use_memory_tools(...):  # tool-mode：仅后端要求被动写入才装
     …
-else: middlewares.append(MemoryMiddleware(agent_name=agent_name, ...))# 22
+else: middlewares.append(MemoryMiddleware(agent_name=agent_name, ...))# 25
 ```
 
 ```
-…14 DynamicContext→15 SkillActivation→16 SkillToolPolicy→17 DurableContext→18 Summarization
-→19 Todo(plan)→20 TokenUsage→21 Title→22 Memory→23 ViewImage→…→35 Clarification
+…17 DynamicContext→18 SkillActivation→19 SkillToolPolicy→20 DurableContext→21 Summarization
+→22 Todo(plan)→23 TokenUsage→24 Title→25 Memory→26 ViewImage→…→39 Clarification
 每个中间件沿模型调用生命周期展开: before_model(压缩检测/待办提醒)→model call(wrap_model_call 包裹)
 →after_model(Todo 防退出/Token 归因/标题)→工具执行→…→after_agent(Memory 入队)
 ```
@@ -65,7 +65,7 @@ else: middlewares.append(MemoryMiddleware(agent_name=agent_name, ...))# 22
 - 所以压缩不是「删消息」，而是一次**有保留策略的状态重写**：可丢的旧消息变 `summary_text`，必须留的（当前请求、注入 reminder）按**精确身份**留在消息流，动手前给记忆子系统一个抢救机会。
 
 ### 1.2 钩子与执行时机/链位置
-- 只挂 `before_model`/`abefore_model`——**每次模型调用前**重新评估，未超阈值则零开销返回。链位 18，紧跟 DurableContext（17）——顺序含义见 1.5「先投影后压缩」。
+- 只挂 `before_model`/`abefore_model`——**每次模型调用前**重新评估，未超阈值则零开销返回。链位 21，紧跟 DurableContext（20）——顺序含义见 1.5「先投影后压缩」。
 - lead 与子代理链都有；lead 经 `create_summarization_middleware` 工厂创建，手动 `/compact` 也走同一工厂（`runtime/context_compaction.py` 调 `acompact_state(force=True)`）——自动/手动路径的模型解析、钩子、保留策略永不漂移。
 
 ### 1.3 内部实现逻辑
@@ -132,10 +132,10 @@ self._record_compaction(...)                                  # 3. CompactionEve
 ```
 
 ### 1.4 与邻居的关系
-- **DurableContext（17，前面）——先投影再压缩**：它先把 `task` 委派结果、技能引用捕获进 `delegations`/`skill_context` 并投影每次请求，压缩才删底层消息——委派摘要/技能引用**压缩删不掉**；反过来压缩新写的 `summary_text` 也由 DurableContext 以隐藏 `durable_context_data` HumanMessage 投影（不可信字段不给 system 权威）。子代理链把 DurableContext 装在压缩之前，使 summary 先于保留的 assistant/tool 尾部投影——否则严格 provider 收到 assistant-first 请求。
-- **MemoryMiddleware（22，后面）**：压缩冲刷与 MemoryMiddleware 是记忆入库的**两个互补入口**——Memory 覆盖「活到 run 结束」的轮次，被压掉的历史靠压缩前钩子抢救，最终进同一个去抖队列。
-- **DynamicContext（14）**：保留判定理解其 ID-swap 协议（`__user` 后缀 + tag），只救 tag 标记、不救 stale `__user` peer——两者共享 `utils/messages.py` 的身份规则。
-- **ReadBeforeWrite（11，底座）**：read 结果消息被压掉 → 其上的文件哈希 mark 消失 → 写门自动失效（再写必须先重读），压缩顺带清了陈旧读锁。
+- **DurableContext（20，前面）——先投影再压缩**：它先把 `task` 委派结果、技能引用捕获进 `delegations`/`skill_context` 并投影每次请求，压缩才删底层消息——委派摘要/技能引用**压缩删不掉**；反过来压缩新写的 `summary_text` 也由 DurableContext 以隐藏 `durable_context_data` HumanMessage 投影（不可信字段不给 system 权威）。子代理链把 DurableContext 装在压缩之前，使 summary 先于保留的 assistant/tool 尾部投影——否则严格 provider 收到 assistant-first 请求。
+- **MemoryMiddleware（25，后面）**：压缩冲刷与 MemoryMiddleware 是记忆入库的**两个互补入口**——Memory 覆盖「活到 run 结束」的轮次，被压掉的历史靠压缩前钩子抢救，最终进同一个去抖队列。
+- **DynamicContext（17）**：保留判定理解其 ID-swap 协议（`__user` 后缀 + tag），只救 tag 标记、不救 stale `__user` peer——两者共享 `utils/messages.py` 的身份规则。
+- **ReadBeforeWrite（13，底座）**：read 结果消息被压掉 → 其上的文件哈希 mark 消失 → 写门自动失效（再写必须先重读），压缩顺带清了陈旧读锁。
 
 ### 1.5 设计权衡
 - **全清再追加 vs 逐条删**：保证零残留，代价是重写 messages 通道；用 RemoveMessage 全清是给 reducer 的删除信号，落库的只是保留窗口，量级可控。
@@ -158,7 +158,7 @@ self._record_compaction(...)                                  # 3. CompactionEve
 - **模型在待办未完成时草草结束**：给出干净最终答案（无工具调用）但 `state.todos` 仍有未完成项，run 却以成功收场。
 
 ### 2.2 钩子与执行时机/链位置
-链位 19（`is_plan_mode` 才装，lead 专属；须在 Clarification 之前）。五个钩子管各自时段：`before_model`/`abefore_model` 上下文丢失检测；`after_model`/`aafter_model` 防提前退出；`wrap_model_call`/`awrap_model_call` 先调父类注入 `write_todos` 系统提示、再把挂起提醒追加到请求末尾；`before_agent`/`after_agent` 清理 run 级账本。
+链位 22（`is_plan_mode` 才装，lead 专属；须在 Clarification 之前）。五个钩子管各自时段：`before_model`/`abefore_model` 上下文丢失检测；`after_model`/`aafter_model` 防提前退出；`wrap_model_call`/`awrap_model_call` 先调父类注入 `write_todos` 系统提示、再把挂起提醒追加到请求末尾；`before_agent`/`after_agent` 清理 run 级账本。
 
 ### 2.3 内部实现逻辑
 
@@ -196,9 +196,9 @@ return {"jump_to": "model"}                                # 5. 强制回 model 
 ```
 
 ### 2.4 与邻居的关系
-- **Summarization（18）**：正是它的压缩把 `write_todos` 滚出窗口——本中间件是压缩副作用的专门修补；`hide_from_ui` 让压缩保留判定/Title 计数/Memory 过滤都不把提醒当真实内容。
-- **TokenUsage（20）**：Todo 状态在 `state.todos`；TokenUsage 归因时对新老列表 diff 生成 `todo_*` 动作，其前端展示数据源正是 TodoMiddleware 维护的 state。
-- **Clarification（35）**：`ask_clarification` 打断等用户回答——`_has_tool_call_intent_or_error` 对工具意图放行，提醒不会把打断误判成「提前收尾」。
+- **Summarization（21）**：正是它的压缩把 `write_todos` 滚出窗口——本中间件是压缩副作用的专门修补；`hide_from_ui` 让压缩保留判定/Title 计数/Memory 过滤都不把提醒当真实内容。
+- **TokenUsage（23）**：Todo 状态在 `state.todos`；TokenUsage 归因时对新老列表 diff 生成 `todo_*` 动作，其前端展示数据源正是 TodoMiddleware 维护的 state。
+- **Clarification（39）**：`ask_clarification` 打断等用户回答——`_has_tool_call_intent_or_error` 对工具意图放行，提醒不会把打断误判成「提前收尾」。
 
 ### 2.5 设计权衡
 - **两个提醒两条通道**：context-loss 提醒进 state（防丢是目的）、completion 提醒只进请求（防泄漏是目的）——同类控制文本按副作用选持久化策略。
@@ -221,7 +221,7 @@ return {"jump_to": "model"}                                # 5. 强制回 model 
 - **重放/重入重复累加**：LangGraph 回放 checkpoint、中间件重入时对同一批用量加两次，计费翻倍。
 
 ### 3.2 钩子与执行时机/链位置
-链位 20（`token_usage.enabled`）；只挂 `after_model`/`aafter_model`，共用同一 `_apply(state)`。时序：
+链位 23（`token_usage.enabled`）；只挂 `after_model`/`aafter_model`，共用同一 `_apply(state)`。时序：
 
 ```
 模型响应落地(消息尾: …T_r1 T_r2 A_new)
@@ -269,7 +269,7 @@ if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
 
 ### 3.4 与邻居的关系
 - **SubagentExecutor**：终态 ToolMessage 由执行器按 `status_contract.py` 写 `subagent_token_usage`；本中间件是唯一把它合并回派发 AI 消息的地方。
-- **TodoMiddleware（19）**：归因读 `state.todos` + 本次 `write_todos` 参数做 diff，与 Todo 共享数据源。
+- **TodoMiddleware（22）**：归因读 `state.todos` + 本次 `write_todos` 参数做 diff，与 Todo 共享数据源。
 - **checkpoint/重放**：归因与 attributed stamp 都是消息上的**加法字段**随 checkpoint 持久化——不回放丢归因、重放不重复累加；`version:1` 让旧前端安全忽略未知字段。
 
 ### 3.5 设计权衡
@@ -291,7 +291,7 @@ if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
 thread 列表全是 "New Conversation" 没信息量；而标题 LLM 调用若混进主消息流或阻塞首轮，用户会看到幻影消息与延迟。
 
 ### 4.2 钩子与执行时机/链位置
-链位 21（恒装配，内部按 `title.enabled` 判定），只挂 `after_model`/`aafter_model`——**首轮完整交换后触发一次**。**同步路径只做本地回退**（不调 LLM，防阻塞事件循环）；**异步路径（默认 `aafter_model`）才走 LLM**。`_should_generate_title` 同时被 worker 中断兜底复用（4.3-④）。
+链位 24（恒装配，内部按 `title.enabled` 判定），只挂 `after_model`/`aafter_model`——**首轮完整交换后触发一次**。**同步路径只做本地回退**（不调 LLM，防阻塞事件循环）；**异步路径（默认 `aafter_model`）才走 LLM**。`_should_generate_title` 同时被 worker 中断兜底复用（4.3-④）。
 
 ### 4.3 内部实现逻辑
 
@@ -331,10 +331,10 @@ if not await run_manager.has_later_started_run(thread_id, run_id): # 无更晚�
 两个门保证不写坏：`wait_for_prior_finalizing`（更早 run 收尾中先等）与 `has_later_started_run`（已有更晚 run 启动、checkpoint 可能被推进 → 跳过兜底，防覆盖新 run 进展）。中断 checkpoint 可能无 messages 通道，`_title_generation_state` 回退 `_graph_input_messages(graph_input)`（本轮原始输入）取用户消息。结果：**中断的首轮也有标题**。
 
 ### 4.4 与邻居的关系
-- **DynamicContext（14）**：标题计数依赖其 reminder 识别，注入的隐藏用户消息不算「第二条用户」。
+- **DynamicContext（17）**：标题计数依赖其 reminder 识别，注入的隐藏用户消息不算「第二条用户」。
 - **InputSanitization（1）**：标题取用户文本优先 `original_user_content`（`get_original_user_content_text`）——用净化前真实文本，避免传输包装/上下文噪音混进标题。
 - **run worker（runtime 层）**：中间件只在 run 正常走完 after_model 触发；中断路径由 worker 在 finalizing 代跑本地回退，两者写同一 `title` checkpoint 通道，worker 侧靠 CAS+双门不覆盖新 run。
-- **Summarization（18）**：标题首轮即生成，几乎不受压缩影响；且 `hide_from_ui` 规则保证 reminder 不进标题素材。
+- **Summarization（21）**：标题首轮即生成，几乎不受压缩影响；且 `hide_from_ui` 规则保证 reminder 不进标题素材。
 
 ### 4.5 设计权衡
 - **同步只走本地回退**：sync `after_model` 里 await LLM 会阻塞 agent 主循环，故同步路径干脆用本地截断——牺牲标题质量换不阻塞；异步路径才享受 LLM 标题。
@@ -355,7 +355,7 @@ if not await run_manager.has_later_started_run(thread_id, run_id): # 无更晚�
 用户画像/偏好/跨会话事实要靠 LLM 抽取，但抽取昂贵——**绝不能跑在 agent 主循环里**。解法：run 结束后把原始消息交给记忆管理器入队，管理器去抖合并，后台线程做过滤、抽取、合并、原子写盘。**中间件只负责投递，不负责抽取**——链上唯一产生记忆写入副作用的地方是后台管理器。
 
 ### 5.2 钩子与执行时机/链位置
-链位 22，lead-only：非 tool-mode 装配；tool-mode 仅当后端声明需要被动写入（`should_use_memory_tools` + `backend_requires_passive_writes_in_tool_mode`）。只挂 `after_agent`/`aafter_agent`：**一次完整 agent run（可能多轮模型+工具）结束后**投递整轮消息。子代理链不装配（子代理与父线程共享 `thread_id`，装了会把内部轮次写进父线程记忆）。
+链位 25，lead-only：非 tool-mode 装配；tool-mode 仅当后端声明需要被动写入（`should_use_memory_tools` + `backend_requires_passive_writes_in_tool_mode`）。只挂 `after_agent`/`aafter_agent`：**一次完整 agent run（可能多轮模型+工具）结束后**投递整轮消息。子代理链不装配（子代理与父线程共享 `thread_id`，装了会把内部轮次写进父线程记忆）。
 
 ### 5.3 内部实现逻辑
 ```python
@@ -391,9 +391,9 @@ def _resolve_add_args(state, runtime):
 ```
 
 ### 5.4 与邻居的关系（读写闭环）
-- **DynamicContext（14，注入侧）**：MemoryMiddleware 是**写侧入口**（原始消息→抽取→落盘）；DynamicContext 是**读侧出口**（把已抽取记忆作为 `__memory` HumanMessage 注入下一轮）。中间件不注入记忆，回灌内容走 DynamicContext 的 `dynamic_context_memory` stamp。
-- **Summarization（18）**：本中间件只见「活到 run 结束」的消息；被压历史由压缩前 `memory_flush_hook`（同一队列、bypass watermark）抢救——两个入口互补。
-- **Todo（19）/ Title（21）**：Todo 提醒带 `hide_from_ui`，后端过滤剔除——框架提醒不会被当用户事实入库。
+- **DynamicContext（17，注入侧）**：MemoryMiddleware 是**写侧入口**（原始消息→抽取→落盘）；DynamicContext 是**读侧出口**（把已抽取记忆作为 `__memory` HumanMessage 注入下一轮）。中间件不注入记忆，回灌内容走 DynamicContext 的 `dynamic_context_memory` stamp。
+- **Summarization（21）**：本中间件只见「活到 run 结束」的消息；被压历史由压缩前 `memory_flush_hook`（同一队列、bypass watermark）抢救——两个入口互补。
+- **Todo（22）/ Title（24）**：Todo 提醒带 `hide_from_ui`，后端过滤剔除——框架提醒不会被当用户事实入库。
 - **子代理**：轮次既不入队（无中间件）也不经 flush（skip_memory_flush）——父线程记忆只记父线程对话，记忆不串台的硬边界。
 
 ### 5.5 设计权衡
@@ -403,7 +403,7 @@ def _resolve_add_args(state, runtime):
 - **身份在入队时定格**：为跨线程正确性把 user 捕获提前——会话归属应在会话内确定，是特性非缺陷。
 
 ### 5.6 源码阅读指引
-中间件本身很短：`_resolve_add_args`（三道跳过+双捕获）→ `after_agent`/`aafter_agent`。理解「投递之后」继续读 `agents/memory/manager.py`（`add`/`aadd` 去抖契约）、`backends/deermem/core/queue.py`（键/bypass watermark/背压）、`core/message_processing.py`（过滤）、`summarization_hook.py`（压缩冲刷入口）。装配条件看 `lead_agent/agent.py` 597–607 行与 `config/memory_config.py`。
+中间件本身很短：`_resolve_add_args`（三道跳过+双捕获）→ `after_agent`/`aafter_agent`。理解「投递之后」继续读 `agents/memory/manager.py`（`add`/`aadd` 去抖契约）、`backends/deermem/core/queue.py`（键/bypass watermark/背压）、`core/message_processing.py`（过滤）、`summarization_hook.py`（压缩冲刷入口）。装配条件看 `lead_agent/agent.py` 670–691 行与 `config/memory_config.py`。
 
 ---
 
@@ -415,4 +415,4 @@ def _resolve_add_args(state, runtime):
 4. **跨线程/跨 run 的身份状态显式化**：Memory 入队时定格 user/trace、Todo 按 `(thread,run)` 记账、TokenUsage 从消息位置读取而非进程缓存——ContextVar 不跨线程、中间件实例跨 run 复用，凡带记忆的状态都必须显式携带作用域。
 5. **压缩不是终点而是枢纽**：Summarization 把 DurableContext 的任务主线、Memory 的事实抢救、Todo 的待办可见性、TokenUsage 的消息配对全串起来——改它的保留策略前，先想清四家邻居。
 
-> **源码速查**：五款中间件在 `backend/packages/harness/deerflow/agents/middlewares/`（`summarization_middleware.py`/`todo_middleware.py`/`token_usage_middleware.py`/`title_middleware.py`/`memory_middleware.py`）；链装配见同目录 `AGENTS.md`（18–22）与 `lead_agent/agent.py::build_middlewares`；中断标题兜底在 `runtime/runs/worker.py::_ensure_interrupted_title`；记忆后端与队列在 `agents/memory/`。
+> **源码速查**：五款中间件在 `backend/packages/harness/deerflow/agents/middlewares/`（`summarization_middleware.py`/`todo_middleware.py`/`token_usage_middleware.py`/`title_middleware.py`/`memory_middleware.py`）；链装配见同目录 `AGENTS.md`（21–25）与 `lead_agent/agent.py::build_middlewares`；中断标题兜底在 `runtime/runs/worker.py::_ensure_interrupted_title`；记忆后端与队列在 `agents/memory/`。

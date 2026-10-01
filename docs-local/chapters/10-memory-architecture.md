@@ -1,12 +1,13 @@
 # 10 长期记忆架构:跨会话 Fact、可插拔后端与动态注入
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写。
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10)编写。
 >
-> 本章覆盖文件:`agents/memory/`(manager.py、tools.py、summarization_hook.py、backends/*)、
-> `agents/middlewares/memory_middleware.py`、`agents/middlewares/dynamic_context_middleware.py`、
+> 本章覆盖文件:`agents/memory/`(manager.py、tools.py、summarization_hook.py、judging.py、
+> signals/*、prescreen/*、backends/*)、`agents/middlewares/memory_middleware.py`、
+> `agents/middlewares/dynamic_context_middleware.py`、
 > `agents/middlewares/summarization_middleware.py`(仅 hook 挂载点)、`config/memory_config.py`、
 > `backends/deermem/deermem/`(config/core/{storage,retrieval,updater,message_processing,eviction,prompt,queue}.py)。
-> 仓库内已有一份 1767 行的自包含深度设计稿 `docs-local/memory-architecture-design.md`(下文简称
+> 仓库内已有一份 1985 行的自包含深度设计稿 `docs-local/memory-architecture-design.md`(下文简称
 > **《设计稿》**),本章是它的**代码校准版导读**:给出骨架、关键决策与真实路径,细节逐节链向设计稿。
 
 > 旧书两章(hawkli ch09 / coolclaws ch11)基于数月前的结构写作(单层 `MemoryManager` + JSON 文档、
@@ -48,7 +49,7 @@ LLM 无状态,`messages` 历史随会话消亡。长期记忆要解决的是:**�
 
 ```
 用户消息 → Agent 回复 ──► MemoryMiddleware (after_agent 捕获)         读链路(每条消息前)
-                            │ MemoryQueue: debounce 10s + 去重          DynamicContextMiddleware
+                            │ MemoryQueue: debounce 30s + 去重          DynamicContextMiddleware
                             ▼                                          (before_agent, lead-only 链最前)
                          MemoryUpdater ─ ① 当前记忆快照+本轮对话        │ get_context(user, agent)
                             │         ② LLM 一次调用 → 六类决策 JSON      ▼
@@ -80,7 +81,7 @@ LLM 无状态,`messages` 历史随会话消亡。长期记忆要解决的是:**�
 
 ### 3.1 Host 共享配置:刻意做薄
 
-`config/memory_config.py` 的 `MemoryConfig` **只持有六个 host 共享字段**,DeerMem 的私有旋钮
+`config/memory_config.py` 的 `MemoryConfig` **只持有八个 host 共享字段**,DeerMem 的私有旋钮
 全部藏在 `backend_config` dict 里——这是"后端可换"的前提:共享 schema 越薄,后端越可移植。
 
 ```yaml
@@ -92,6 +93,8 @@ memory:
   shutdown_flush_timeout_seconds: 30   # 优雅停机排空缓冲的硬时限(1-300s)
   manager_class: deermem      # deermem | mem0 | honcho | openviking | noop | dotted path
   backend_config: { }         # 逐字传给后端自解析(DeerMem 解析成 DeerMemConfig)
+  prescreen: { mode: "off" }             # 可选:抽取前成本闸门(off | shadow | enforce,默认 off)
+  signal_classification: { mode: "off" } # 可选:模型信号提示(off | shadow | hints,默认 off)
 ```
 
 旧版散在 `memory:` 顶层的 DeerMem 私有字段(旧书照抄的那批:`max_facts`、`max_injection_tokens`、
@@ -107,18 +110,20 @@ memory:
 | 层 | 方法 | 说明 |
 |---|---|---|
 | **Tier-1(abstract)** | `add(thread_id, messages, ...)` / `get_context(user_id, ...)` | 写(入队抽取)+ 读(返回**注入就绪的纯文本**)。后端的根本职责,必须实现 |
-| **Tier-2(管理,带默认)** | `add_nowait` / `search` / `get_memory` / `clear_memory` / `import_memory` / `export_memory` / `shutdown_flush` | 默认委托或抛 `NotImplementedError`;支持的才覆盖 |
-| **Tier-3(可选 hook)** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` / `on_pre_compress` / `on_turn_start` | 启动预热、事实 CRUD、摘要压缩前回调 |
+| **Tier-2(管理,带默认)** | `add_nowait` / `search` / `get_memory` / `delete_memory` / `clear_memory` / `cancel_by_agent` / `import_memory` / `export_memory` / `shutdown_flush` | 默认委托或抛 `NotImplementedError`;支持的才覆盖 |
+| **Tier-3(可选 hook)** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` / `on_pre_compress` / `on_turn_start` / `refresh_judge` / `close` | 启动预热、事实 CRUD、摘要压缩前回调、判官热重载 |
 
 构造入口是**类方法 `from_config(backend_config, *, mode, **host_hooks)`**,由工厂调用而非直接
-`cls(...)`,让每个后端自己决定依赖组装。两个**类级声明**(ClassVar):
+`cls(...)`,让每个后端自己决定依赖组装。三个**类级声明**(ClassVar):
 
 - `supports_search: ClassVar[bool]` —— 实现了 `search()` 必须置 True,`mode: tool` 强制要求。
+- `supports_agent_scoped_management: ClassVar[bool]` —— 置 True 的后端才接受 Gateway 带
+  `agent_name` 的按 Agent 作用域管理读写;否则作用域管理请求返回 501,而不是静默落到用户默认桶。
 - `requires_passive_writes_in_tool_mode: ClassVar[bool]` —— 置 True 的后端(如 openviking)在
   tool 模式下**保留 `MemoryMiddleware`**,形成"工具搜索 + 被动抽取"混合模式。
 
-错误类型同样是公共契约:`MemoryManagerError` 基类派生 `MemoryConflictError` /
-`MemoryCorruptionError`;DeerMem 把存储层冲突转换为公共类型,Gateway 映射 **409 / 稳定 500**。
+错误类型同样是公共契约:`MemoryManagerError` 基类派生 `MemoryReadError`(严格读必须成功时抛出)/
+`MemoryConflictError` / `MemoryCorruptionError`;DeerMem 把存储层冲突转换为公共类型,Gateway 映射 **409 / 稳定 500**。
 
 契约的三个**刻意中立点**:① `get_context` 返回的文本格式由后端自定(DeerMem 做"全量读 + 置信度
 裁剪",别的后端可以自己检索 + 格式化,格式不是契约);② `add` 收到的是**原始对话消息**,过滤/信号
@@ -285,11 +290,12 @@ category,它只提升已有事实的 confidence。信号的作用是转成 promp
 (`_build_signal_hints`):命中 correction 时提示"记 confidence≥0.95 的 correction 类事实,且仅当是
 可复用的用户级偏好;对当前任务文件/方向的纠正是 thread/project 级,不得入库"。**信号只是提示
 不是裁决**,最终能否入库由确定性写闸门逐条判定。信号还有第二个用途——**背压豁免**:带信号的
-更新在队列满时也总是被允许入队,保证高价值记忆不被丢。
+更新在队列满时也总是被允许入队,保证高价值记忆不被丢。(此外还有一条**可选的模型信号分类器**,
+在确定性正则之外额外提供 `reinforcement`/`correction` 提示标签——默认关闭,详见 §5.6。)
 
 ### 5.3 队列与抽取:一次 LLM 调用,六类决策
 
-debounce(默认 10s)到期后在 Timer 线程上执行一次抽取。模型同时看到四样输入:① 当前
+debounce(默认 30s)到期后在 Timer 线程上执行一次抽取。模型同时看到四样输入:① 当前
 `(user, agent)` 桶记忆快照(JSON,序列化前把 `<` `>` `&` 转义,防 `</current_memory>` 逃出块边界
 伪造权威区,issue #4044);② 过滤后的本轮对话(单条超 1000 字符截头尾 500);③ 条件提示段
 (correction_hint / staleness_review_section / consolidation_section);④ 静态系统指令
@@ -357,6 +363,25 @@ LLM 用 `factsToRemove` 表达"旧事实被推翻",可带 `replacementFactIndex`
 条目。规则:**只有替代的新事实通过闸门、去重、max_facts 裁剪之后,旧事实才被删**——把"删旧的 +
 写新的"绑成一个原子决策,避免"旧删了、新没写进去"的数据丢失。task/project 级事实不允许 LLM
 单方面删除(fail-closed)。
+
+### 5.6 可选前置:成本预筛 + 模型信号提示(默认关)
+
+在"队列 → 抽取"之间还有一层**可选判官**:`agents/memory/judging.py` 提供共享的 digest 缓存与
+文本工具,`prescreen/`、`signals/` 两个**可插拔 provider** 由 `signals/coordinator.py::build_memory_judge`
+组装成 `MemoryBatchVerdict`,以 `judge` 钩子程序注入进 DeerMem。`memory.prescreen` 与
+`memory.signal_classification` **默认都 `off`**:off 时既不解析类路径、不构造对象、也不校验凭证,
+抽取路径与没有这层功能逐字节一致。
+
+- **pre-screen = 成本闸门,不是安全边界**:只回答"这批对话值不值得付一次抽取调用"。`shadow` 判定并
+  记录但照常抽取;`enforce` 时低概率批次**跳过调用并推进水位**(当作"没有可留存内容"消费)。所有
+  失败方向都是**照常抽取**(报错、超时、无判定、超限批)——判官绝不会丢一条记忆,也不会拦一条。
+- **signal classification = 只增不减的提示**:把模型给出的 `reinforcement` / `correction` 提示标签
+  并入抽取提示文本(确定性 `detect_signals` 正则仍然保留),但**强化确认门只读确定性信号集**,模型
+  判定永远写不出一条确认;唯一例外是 `enforce` × `hints` 下模型暗示**否决一次 skip**。
+- 两侧共享同一批对话文本与同一份 digest 缓存,可按 `combine` 合并为一次请求;判官配置**热重载**
+  (Tier-3 `refresh_judge`),改 `memory.prescreen` / `memory.signal_classification` 无需重启。
+- 默认配置下判官实际"惰性":`staleness_review_enabled` / `consolidation_enabled` 任一开启时整批不判
+  (跳过会连带跳过该批的维护复查),而这两者默认开启。
 
 ---
 
@@ -557,13 +582,17 @@ Host 共享字段见 §3.1;DeerMem 私有旋钮默认值(`backends/deermem/deerm
 
 | 旋钮 | 默认 | 含义 |
 |---|---|---|
-| `debounce_seconds` | 10 | 队列合并窗口 |
+| `debounce_seconds` | 30 | 队列合并窗口 |
+| `queue_max_depth` | 1000 | 队列背压上限(0 = 不限;信号/紧急冲刷永远准入) |
 | `max_facts` | 100 | 每桶事实容量上限(容量淘汰的 `max_facts`) |
 | `fact_confidence_threshold` | 0.7 | 新事实入库置信度下限 |
+| `fact_dedup_enabled` / `fact_dedup_similarity_threshold` | false / 0.7 | 写入侧近重复合并(opt-in,§5.3) |
 | `max_injection_tokens` / `guaranteed_token_budget` | 2000 / 500 | 注入双预算(§7.1) |
 | `guaranteed_categories` | `["correction"]` | 特权预留类别 |
 | `token_counting` | `tiktoken` | `char` = 离线字符估算 |
 | `retrieval_adapter` | `fts5` | 空值 = 子串兜底 |
+| `retrieval_relevance_enabled` / `retrieval_relevance_weight` | false / 0.5 | 相关性排序(opt-in):相关性 vs 置信度 |
+| `retrieval_diversity_weight` | 0.0 | MMR 近重复惩罚(仅相关性排序开启时) |
 | `fact_eviction_policy` | `confidence` | `hybrid-v1` opt-in;shadow 影子模式默认关 |
 | `staleness_review_enabled` / `staleness_age_days` | 开 / 90 | 复查开关 / 兜底窗口(§6.2) |
 | `staleness_min_candidates` / `staleness_max_removals_per_cycle` | 3 / 10 | 复查触发与每周期删除上限 |
@@ -573,7 +602,11 @@ Host 共享字段见 §3.1;DeerMem 私有旋钮默认值(`backends/deermem/deerm
 | `consolidation_min_facts` / `max_sources` | 8 / 8 | 触发阈值 / 单组源上限 |
 | `watermark_max_keys` | 4096 | 会话水位缓存软上限(0 = 无界;丢一条水位 → 下轮可能重抽一批) |
 
-运维纪律:记忆 manager 是**进程级单例**,改后端/配置需重启(无热加载);停机排空预算
+判官两槽(`memory.prescreen` / `memory.signal_classification`)是 **host 共享**字段(非 DeerMem 私有),
+默认 `off`;开启后由 `typesafe:` 顶层连接块提供 endpoint/model/凭证默认值(见 §5.6)。
+
+运维纪律:记忆 manager 是**进程级单例**,改后端需重启;但判官配置(`memory.prescreen` /
+`memory.signal_classification`)走 `refresh_judge` **热重载**,无需重启。停机排空预算
 `shutdown_flush_timeout_seconds`(30s,1-300)必须装进 K8s `terminationGracePeriodSeconds`
 (连同 retrieval 预热 1s);DeerMem 升级前先停服快照存储根;`memory.json` 的 out-of-band 人工编辑
 需 `reload_memory` 让缓存感知。测试锚点:`backend/tests/test_memory_updater.py`(闸门/规范化)、

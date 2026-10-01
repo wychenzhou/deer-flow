@@ -1,6 +1,6 @@
 # 第 3 章　快速上手：从零跑起一个 DeerFlow
 
-> 基于 DeerFlow 最新源码（本仓库 commit `2672e209`，2026-09）编写。本仓库快照版本为 **2.1.0**（`backend/pyproject.toml` 与 `frontend/package.json` 同步锁定），MIT License。
+> 基于 DeerFlow 最新源码（本仓库 commit `11b339d6`，2026-10-01）编写。本仓库快照版本为 **2.2.0-dev**（`backend/pyproject.toml` 与 `frontend/package.json` 同步锁定为 2.2.0-dev），MIT License。
 
 > **旧版说明**：本章融合两本旧书对应内容（hawkli 版第 1 章 §1.6「环境准备」与附录 B「贡献指南」、coolclaws 版第 3 章「快速上手」），但一切以重构后的**最新仓库**为准校准——旧书基于数月前的 DeerFlow（`backend/src/` 目录、独立 LangGraph Server 进程、`mcp_config.json`、skill.yaml 等），其中大量路径、命令与配置项在 2.x 已作废。凡冲突处，以本章为准。
 
@@ -151,26 +151,33 @@ make config
 
 ### 3.4.3　`config.yaml` 顶层结构
 
-全量模板约 2800 行、绝大多数为注释示例。顶层键一览（行号对应本仓库 `config.example.yaml`，`config_version: 39`）：
+全量模板 3389 行、绝大多数为注释示例。顶层键一览（行号对应本仓库 `config.example.yaml`，`config_version: 50`）：
 
 ```
-config_version: 39      # 升级检测；make config-upgrade 合并新字段
+config_version: 50      # 升级检测；make config-upgrade 合并新字段
 log_level: info         # debug/info/warning/error
 token_usage:            # 用量统计（enabled: true）
 token_budget:           # 单次 run 硬预算（默认关闭）
-max_recursion_limit: 1000
+recursion_limit: 100    # 每次 run 默认递归步数（客户端可覆盖）
+max_recursion_limit: 1000   # 服务端硬上限
 models:                 # ★ LLM 模型列表，第一个为默认模型（模板里全是注释示例，需自行启用）
+knowledge_base:         # 知识库检索作用域
 tool_groups:            # web / file:read / file:write / bash / browser / knowledge
 tools:                  # ★ 工具开关与 provider 选择
 tool_search:            # 延迟加载工具
+tool_artifacts:         # 工具产物句柄注册表
 uploads:                # 文件上传（转换、大小限制）
 sandbox:                # ★ 沙箱模式（见 3.7）
 subagent_runtime:       # 子智能体上限（如 max_total_per_run）
 skills:                 # skills 路径、容器挂载点、延迟发现
 summarization:          # 上下文自动摘要（默认开启）
 memory:                 # 长期记忆（默认开启）
+pii_redaction:          # PII 脱敏
+projects:               # 项目运行时
+task_continuity:        # 任务连续性（task_notes/task_history）
 database:               # sqlite（默认）/ postgres；共享给 checkpointer/Store/应用数据
 run_events:             # run 事件存储：memory（默认）/ db / jsonl
+blob_storage:           # 内容寻址 blob 存储
 scheduler:              # 定时任务（默认关闭）
 authorization:          # 登录鉴权（enabled: false 默认免登录）
 plugins:                # Python 扩展包（仅可信来源，操作者手动管理）
@@ -424,9 +431,10 @@ tail -f logs/gateway.log                # 本地模式
 
 | 配置（均在 `config.yaml`） | 默认 | 说明 |
 |------|------|------|
-| `config_version` | 39 | schema 版本；`make config-upgrade` 自动合并缺失字段并备份 `.yaml.bak` |
+| `config_version` | 50 | schema 版本；`make config-upgrade` 自动合并缺失字段并备份 `.yaml.bak` |
 | `log_level` | info | deerflow 模块日志级别 |
 | `models[0]` | —（模板全注释） | 列表第一个为默认模型 |
+| `recursion_limit` / `max_recursion_limit` | 100 / 1000 | 每次 run 默认递归步数 / 服务端硬上限 |
 | `tools:` | DDG 搜索 + Jina 抓取 + 文件工具 + bash | 同名工具只能启用一个 provider |
 | `sandbox.use` / `allow_host_bash` | local / false | 沙箱 provider；宿主 bash 默认关 |
 | `skills.path` / `container_path` | 项目根 `skills/` / 沙箱内挂载点 | 技能目录与挂载点；`deferred_discovery: true` 可改按需发现技能 |

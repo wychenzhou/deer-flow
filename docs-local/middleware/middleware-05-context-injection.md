@@ -1,4 +1,4 @@
-# 上下文注入中间件：动态日期 · 技能激活 · 技能策略 · 持久上下文（链位 14、15、16、17）
+# 上下文注入中间件：动态日期 · 技能激活 · 技能策略 · 持久上下文（链位 17、18、19、20）
 
 > 本篇解析链上四个「把东西塞进模型请求」的中间件。它们都在做**消息注入或工具改写**，却各面对一组不同的坑：前缀缓存被破坏、记忆获得系统权威、技能权限边界模糊、压缩冲掉委派账本。这四个文件是理解 DeerFlow「**静态系统提示 + 后置注入**」「**信任分层**」「**顺序即正确性**」三条主线的标本。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 `lead_agent/agent.py::build_middlewares`。
@@ -7,10 +7,12 @@
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 14 | `DynamicContextMiddleware` | 日期/记忆一次性冻结注入首条用户消息 | `before_agent` | lead-only；subagent 用 `SubagentDateContextMiddleware` |
-| 15 | `SkillActivationMiddleware` | 斜杠技能激活 + 正文注入 + 密钥绑定 | `wrap_model_call`（每次） | 斜杠激活系统 |
-| 16 | `SkillToolPolicyMiddleware` | 激活技能 allowed-tools 裁 schema / 拦执行 | `wrap_model_call` + `wrap_tool_call` | 技能策略系统 |
-| 17 | `DurableContextMiddleware` | 委派/技能引用压缩前捕获并投影 | `before_model`/`after_model`/`wrap_model_call` | lead + subagent |
+| 17 | `DynamicContextMiddleware` | 日期/记忆一次性冻结注入首条用户消息 | `before_agent` | lead-only；subagent 用 `SubagentDateContextMiddleware` |
+| 18 | `SkillActivationMiddleware` | 斜杠技能激活 + 正文注入 + 密钥绑定 | `wrap_model_call`（每次） | 斜杠激活系统 |
+| 19 | `SkillToolPolicyMiddleware` | 激活技能 allowed-tools 裁 schema / 拦执行 | `wrap_model_call` + `wrap_tool_call` | 技能策略系统 |
+| 20 | `DurableContextMiddleware` | 委派/技能引用压缩前捕获并投影 | `before_model`/`after_model`/`wrap_model_call` | lead + subagent |
+
+> **链位口径**：本篇四主角取 `agents/middlewares/AGENTS.md` 的 17/18/19/20。注意第 28 位 `DeferredToolPromotionAuditMiddleware` 是**职能分组编号**——它虽归入延迟工具族（27 McpRouting / 28 Audit / 29 Filter），物理上却**紧随 `SkillActivationMiddleware`（18）、排在 `SkillToolPolicyMiddleware`（19）之前**，且 ordering.py 强校验它必须 outer of `SkillToolPolicyMiddleware`（见 §2.2 与 §3.2）。
 
 ---
 
@@ -42,7 +44,7 @@ Skill 相关跨中间件信号（斜杠激活源、工具策略决策、密钥�
 
 ---
 
-## 1. DynamicContextMiddleware（链位 14）
+## 1. DynamicContextMiddleware（链位 17）
 
 文件 `agents/middlewares/dynamic_context_middleware.py`（451 行）；钩子 `before_agent`/`abefore_agent`（图状态更新，返回 `{"messages": [...]}`）。
 
@@ -54,7 +56,7 @@ Skill 相关跨中间件信号（斜杠激活源、工具策略决策、密钥�
 - **坑 5：注入路径阻塞会饿死事件循环 / 挂死请求。** 记忆加载是同步文件 I/O，tiktoken 首次 BPE 下载可阻塞到 OS TCP 超时（约 26 分钟）。对策：async 路径 `asyncio.to_thread` 下放 + **5 秒超时**，超时本轮优雅降级（不注入新内容，已冻结的上下文仍生效）。
 
 ### 1.2 钩子与链位置
-`before_agent` 每轮图执行开始时跑一次（非每次模型调用）；返回的 update 经 `messages` 通道（`add_messages` reducer）写回 checkpoint——**首轮注入因此持久化**，下轮无需重注。链位 14：lead-only，在 base（1–13）之后、SkillActivation（15）之前。subagent **不装本中间件**，装轻量兄弟 `SubagentDateContextMiddleware`：一次 `before_agent` 注入只含日期的 SystemMessage，无记忆查找、无 ID-swap、无午夜纠正——subagent 图一次性、从新 state 起，lead 那套生命周期纯属浪费。
+`before_agent` 每轮图执行开始时跑一次（非每次模型调用）；返回的 update 经 `messages` 通道（`add_messages` reducer）写回 checkpoint——**首轮注入因此持久化**，下轮无需重注。链位 17：lead-only，在 base（1–16）之后、SkillActivation（18）之前。subagent **不装本中间件**，装轻量兄弟 `SubagentDateContextMiddleware`：一次 `before_agent` 注入只含日期的 SystemMessage，无记忆查找、无 ID-swap、无午夜纠正——subagent 图一次性、从新 state 起，lead 那套生命周期纯属浪费。
 
 ### 1.3 内部实现逻辑
 #### frozen-snapshot：ID-swap 三件套
@@ -106,9 +108,9 @@ return {"messages": _make_reminder_and_user_messages(messages[idx],
 ```
 
 ### 1.5 与邻居的关系与顺序约束
-- **Summarization（18）认识它的形状**：压缩时**按消息 ID 保留最新真实用户请求**；不带 tag 的旧 `__user` peer 可进摘要；带 `dynamic_context_reminder` 标记的提醒（日期 SystemMessage + `__memory` 记忆 peer）被 `_preserve_dynamic_context_reminders` 救回——否则压缩一次，模型的"今天"与记忆即丢。
-- **SystemMessageCoalescing（26）**：per-request 把 SystemMessage 合并成单条 leading system（严格 provider 拒收非开头 system）；跨午夜只保留**最新**日期提醒，完成日期收敛。subagent 侧 `SubagentDateContextMiddleware` 紧挨 coalescer 之前装配，内建 prompt + 日期提醒到达 provider 时仍是单个 leading system 块。
-- **SkillActivation（15）**：`__user` 副本保留原始 `additional_kwargs`，斜杠检测依赖的 `original_user_content` 随副本保留，二者无直接耦合。
+- **Summarization（21）认识它的形状**：压缩时**按消息 ID 保留最新真实用户请求**；不带 tag 的旧 `__user` peer 可进摘要；带 `dynamic_context_reminder` 标记的提醒（日期 SystemMessage + `__memory` 记忆 peer）被 `_preserve_dynamic_context_reminders` 救回——否则压缩一次，模型的"今天"与记忆即丢。
+- **SystemMessageCoalescing（30）**：per-request 把 SystemMessage 合并成单条 leading system（严格 provider 拒收非开头 system）；跨午夜只保留**最新**日期提醒，完成日期收敛。subagent 侧 `SubagentDateContextMiddleware` 紧挨 coalescer 之前装配，内建 prompt + 日期提醒到达 provider 时仍是单个 leading system 块。
+- **SkillActivation（18）**：`__user` 副本保留原始 `additional_kwargs`，斜杠检测依赖的 `original_user_content` 随副本保留，二者无直接耦合。
 
 ### 1.6 设计权衡
 | 权衡 | 选择 | 代价 |
@@ -124,7 +126,7 @@ return {"messages": _make_reminder_and_user_messages(messages[idx],
 
 ---
 
-## 2. SkillActivationMiddleware（链位 15）
+## 2. SkillActivationMiddleware（链位 18）
 
 文件 `agents/middlewares/skill_activation_middleware.py`（593 行）；钩子 `wrap_model_call`/`awrap_model_call`（**每次模型调用**，per-request 改写）。
 
@@ -136,7 +138,9 @@ return {"messages": _make_reminder_and_user_messages(messages[idx],
 - **坑 5：工具循环里一次 slash 触发多次模型调用。** 对策：run 级去重（见 2.3），防重复读盘/注入/审计。
 
 ### 2.2 钩子与链位置
-`wrap_model_call` 每次模型调用在最外层改写请求；**不在** `before_agent`——激活上下文是当前轮、当前模型调用的临时上下文，经 `request.override(messages=...)` 只影响本次请求，**从不写回图状态**，因此工具循环第 2..N 次模型调用从 state 重建的 messages 里没有它，run context（`__slash_skill_activation_run`）成为唯一跨调用信号。链位 15：前有 InputSanitization（`original_user_content` 保证 sanitized 消息不隐藏斜杠；读取走 `get_original_user_content_text`）。**必须紧邻 16 之前**：本轮 wrap 内先写 `__slash_skill_secret_source`，内层 SkillToolPolicy 立刻读同一 run context 决定工具裁剪。同一 `slash_source_owner_token` 在 `build_middlewares` 里一次 mint 注入 15 与 16，靠它互相认证斜杠源；subagent runtime（`subagents/executor.py`）复用同一 pair，其 `skills` 白名单只限 discovery/activation。
+`wrap_model_call` 每次模型调用在最外层改写请求；**不在** `before_agent`——激活上下文是当前轮、当前模型调用的临时上下文，经 `request.override(messages=...)` 只影响本次请求，**从不写回图状态**，因此工具循环第 2..N 次模型调用从 state 重建的 messages 里没有它，run context（`__slash_skill_activation_run`）成为唯一跨调用信号。链位 18：前有 InputSanitization（`original_user_content` 保证 sanitized 消息不隐藏斜杠；读取走 `get_original_user_content_text`）。**必须紧邻 19 之前**：本轮 wrap 内先写 `__slash_skill_secret_source`，内层 SkillToolPolicy 立刻读同一 run context 决定工具裁剪。同一 `slash_source_owner_token` 在 `build_middlewares` 里一次 mint 注入 18 与 19，靠它互相认证斜杠源；subagent runtime（`subagents/executor.py`）复用同一 pair，其 `skills` 白名单只限 discovery/activation。
+
+> **夹在 18 与 19 之间的 `DeferredToolPromotionAuditMiddleware`（#28）**：物理装配上，`build_middlewares` 在本节之后、`SkillToolPolicyMiddleware` 之前 append 第 28 位 `DeferredToolPromotionAuditMiddleware`（仅当有延迟工具）。它观测最终 `tool_search` 的 `Command`，**必须在 `SkillToolPolicyMiddleware` 之外**，这样被策略拒绝的 schema 名永远不会被记为有效提升——这正是 ordering.py 声明 `DeferredToolPromotionAudit` outer of `SkillToolPolicy` 的原因（详见 [07](middleware-07-vision-routing.md)）。
 
 ### 2.3 内部实现逻辑
 #### 严格语法 + 三重门禁 + 失败即返回
@@ -202,8 +206,8 @@ wrap_model_call(第2..N次, 同 run 工具循环): state 重建的 messages 无 
 ```
 
 ### 2.5 与邻居的关系与顺序约束
-- **SkillToolPolicy（16）紧邻其后**：15 先把斜杠源（路径 + owner_token）写进 `__slash_skill_secret_source`，16 随即读取决定工具集；两者共享 `slash_source_owner_token`，16 另 mint 自己的 `_decision_owner_token`，装配顺序有约束断言。
-- **DurableContext（17）的 `skill_context` 是它的 in-context 源**：17 捕获模型读过的技能 → state 通道（跨轮持久）→ 15 每轮读它做密钥绑定、16 读它做策略源。
+- **SkillToolPolicy（19）紧邻其后**：18 先把斜杠源（路径 + owner_token）写进 `__slash_skill_secret_source`，19 随即读取决定工具集；两者共享 `slash_source_owner_token`，19 另 mint 自己的 `_decision_owner_token`，装配顺序有约束断言。
+- **DurableContext（20）的 `skill_context` 是它的 in-context 源**：20 捕获模型读过的技能 → state 通道（跨轮持久）→ 18 每轮读它做密钥绑定、19 读它做策略源。
 - **InputSanitization（1）的 `original_user_content`**：sanitized 消息不弄丢斜杠文本（`get_original_user_content_text` 优先读这份 server-owned 原始内容）。
 
 ### 2.6 设计权衡
@@ -221,7 +225,7 @@ wrap_model_call(第2..N次, 同 run 工具循环): state 重建的 messages 无 
 
 ---
 
-## 3. SkillToolPolicyMiddleware（链位 16）
+## 3. SkillToolPolicyMiddleware（链位 19）
 
 文件 `agents/middlewares/skill_tool_policy_middleware.py`（364 行）；钩子 `wrap_model_call`（裁 schema）+ `wrap_tool_call`（执行阻断 + 过滤 `tool_search` 结果）。
 
@@ -234,7 +238,7 @@ wrap_model_call(第2..N次, 同 run 工具循环): state 重建的 messages 无 
 - **坑 6：一个模型的工具循环多次调用，策略要一致且防伪造。** 对策：版本化 + per-instance owner-token 签名的决策缓存（3.3）。
 
 ### 3.2 钩子与链位置
-`wrap_model_call`（外层裁 schema 后交 handler）与 `wrap_tool_call`（执行边界阻断 + 过滤 tool_search 返回）。链位 16：紧贴 15 之后——`_active_policy` 第一件事是带 owner-token 读 15 写的斜杠源；在 DurableContext（17）之前。subagent runtime 复用同 pair。
+`wrap_model_call`（外层裁 schema 后交 handler）与 `wrap_tool_call`（执行边界阻断 + 过滤 tool_search 返回）。链位 19：紧贴 18 之后（中间仅可能夹一个第 28 位 `DeferredToolPromotionAuditMiddleware`，它也必须 outer of 本体）——`_active_policy` 第一件事是带 owner-token 读 18 写的斜杠源；在 DurableContext（20）之前。subagent runtime 复用同 pair。
 
 ### 3.3 内部实现逻辑
 #### 活动策略判定
@@ -296,8 +300,8 @@ wrap_tool_call: bash → 放行执行; web_fetch → ToolMessage(status=error);
 ```
 
 ### 3.5 与邻居的关系与顺序约束
-- **必须紧跟在 SkillActivation 之后**：斜杠源由 15 在本轮 wrap 写入 run context，16 第一层 wrap 就要读到；倒置会让斜杠激活本轮不生效（下轮才被 15 补写）。
-- 与 **DurableContext（17）的 `skill_context`** 互为输入：17 捕获模型读过的技能 → state → 16 无斜杠时以它为并集源；17 只投影引用，模型仍须 `read_file`（在保底工具内）重读正文。
+- **必须紧跟在 SkillActivation 之后**：斜杠源由 18 在本轮 wrap 写入 run context，19 第一层 wrap 就要读到；倒置会让斜杠激活本轮不生效（下轮才被 18 补写）。
+- 与 **DurableContext（20）的 `skill_context`** 互为输入：20 捕获模型读过的技能 → state → 19 无斜杠时以它为并集源；20 只投影引用，模型仍须 `read_file`（在保底工具内）重读正文。
 - 声明为**尽力而为的行为约束，不是硬安全边界**：`bash cat SKILL.md` 旁路加载不被捕获；有界自主的 `skill_context` 可逐出旧条目（上限/淘汰）使技能悄悄掉出策略。
 
 ### 3.6 设计权衡
@@ -314,7 +318,7 @@ docstring → `_active_policy`（三来源判定）→ `_allowed_names`/`_read_p
 
 ---
 
-## 4. DurableContextMiddleware（链位 17）
+## 4. DurableContextMiddleware（链位 20）
 
 文件 `agents/middlewares/durable_context_middleware.py`（286 行）；钩子 `before_model`/`after_model`（**捕获**，写 ThreadState 通道）+ `wrap_model_call`（**注入**，per-request 渲染，不回写 state）。
 
@@ -328,7 +332,7 @@ docstring → `_active_policy`（三来源判定）→ `_allowed_names`/`_read_p
 ### 4.2 钩子与链位置
 - **捕获**：`before_model` → `_capture`（委派 + 技能）；`after_model` → `_capture_delegations`（模型刚发出的 task 调用在本步收尾时立刻入账）。
 - **注入**：`wrap_model_call` 每轮渲染注入，不回写 state——每次重算反映最新状态，压缩/中断不会在历史里留下半截数据块。
-- 链位 17：lead 链在 SkillToolPolicy（16）之后、**Summarization（18）之前**——「委派在压缩前捕获」的硬前提（17 的 `after_model` 先于 18 下一轮 `before_model` 的压缩）。subagent 链（`build_subagent_runtime_middlewares`）同样置于 Summarization 之前（其后还有 `SubagentDateContextMiddleware` 与 coalescer）。
+- 链位 20：lead 链在 SkillToolPolicy（19）之后、**Summarization（21）之前**——「委派在压缩前捕获」的硬前提（20 的 `after_model` 先于 21 下一轮 `before_model` 的压缩）。subagent 链（`build_subagent_runtime_middlewares`）同样置于 Summarization 之前（其后还有 `SubagentDateContextMiddleware` 与 coalescer）。
 
 ### 4.3 内部实现逻辑
 #### 捕获一：委派账本（`delegations` 通道）
@@ -399,10 +403,10 @@ Completed entries are reusable results. Failed, cancelled, or timed-out entries 
 ```
 
 ### 4.5 与邻居的关系与顺序约束
-- **必须位于 Summarization 之前**：捕获依赖压缩前的消息（`after_model` 先跑）；排到 18 之后则委派/技能引用先被压缩再捕获——什么都抓不到。subagent 装配 `[…, DurableContext, Summarization, SubagentDateContext, SystemMessageCoalescing]` 同理：压缩出的 `summary_text` 经 DurableContext 投影到**保留的 assistant/tool 尾之前**，严格 provider 不会收到 assistant-first 请求。
-- **SkillActivation（15）/SkillToolPolicy（16）消费它的 `skill_context` 通道**（分别做密钥绑定与并集策略源）。
-- **SystemMessageCoalescing（26）合并它插入的 SystemMessage 契约**（non-leading system → 单条开头）。
-- **Summarization 不自己 stamp**：其摘要文本只经 17 已 stamp 的 `durable_context_data` 块进入请求，没有自己的消息可打。
+- **必须位于 Summarization 之前**：捕获依赖压缩前的消息（`after_model` 先跑）；排到 21 之后则委派/技能引用先被压缩再捕获——什么都抓不到。subagent 装配 `[…, DurableContext, Summarization, SubagentDateContext, SystemMessageCoalescing]` 同理：压缩出的 `summary_text` 经 DurableContext 投影到**保留的 assistant/tool 尾之前**，严格 provider 不会收到 assistant-first 请求。
+- **SkillActivation（18）/SkillToolPolicy（19）消费它的 `skill_context` 通道**（分别做密钥绑定与并集策略源）。
+- **SystemMessageCoalescing（30）合并它插入的 SystemMessage 契约**（non-leading system → 单条开头）。
+- **Summarization 不自己 stamp**：其摘要文本只经 20 已 stamp 的 `durable_context_data` 块进入请求，没有自己的消息可打。
 
 ### 4.6 设计权衡
 | 权衡 | 选择 | 代价 |
@@ -422,18 +426,19 @@ Completed entries are reusable results. Failed, cancelled, or timed-out entries 
 ## 5. 一次 slash 激活的完整旅程（四者协作总览）
 ```
 用户 "/web-research 查 x 定价"
-  14 DynamicContext  before_agent      已有冻结 reminder → 同日无操作;前缀命中缓存
-  15 SkillActivation wrap_model_call   解析 slash → 门禁 → 注入正文(隐藏 HumanMessage)
+  17 DynamicContext  before_agent      已有冻结 reminder → 同日无操作;前缀命中缓存
+  18 SkillActivation wrap_model_call   解析 slash → 门禁 → 注入正文(隐藏 HumanMessage)
                                        写斜杠源/run-key → 密钥绑定: required-secrets → sandbox env
-  16 SkillToolPolicy wrap_model_call   读斜杠源 → allowed-tools ∪ 框架保底 → 裁 schema
+  (28 DeferredToolPromotionAudit)      观测 tool_search 最终 Command,只记未被策略拒绝的提升
+  19 SkillToolPolicy wrap_model_call   读斜杠源 → allowed-tools ∪ 框架保底 → 裁 schema
                       wrap_tool_call   执行边界阻断; tool_search 结果过滤
-  17 DurableContext  before/after_model task 委派与技能读事件入账(delegations/skill_context)
+  20 DurableContext  before/after_model task 委派与技能读事件入账(delegations/skill_context)
                       wrap_model_call  契约 + 数据块投影(摘要/账本/技能引用)
-  18 Summarization   (后续轮)压缩 A/T 消息 → 账本/引用已在 state 通道,压缩不丢主线
+  21 Summarization   (后续轮)压缩 A/T 消息 → 账本/引用已在 state 通道,压缩不丢主线
   ── subagent 侧: [SubagentDateContext(日期) + SkillActivation/SkillToolPolicy(同 pair)
                     + DurableContext 置于 Summarization 之前] ──
 ```
-顺序即正确性的三条硬依赖：(a) 15 在 16 前——斜杠源先写后读，共享 `slash_source_owner_token`；(b) 17 在 18 前——委派/技能引用先捕获后压缩；(c) 14 的 `__user`/`__memory` 提醒形态是 18 压缩保留逻辑与 26 coalescing 的已知输入。
+顺序即正确性的三条硬依赖：(a) 18 在 19 前——斜杠源先写后读，共享 `slash_source_owner_token`（#28 夹在两者之间且必须 outer of 19）；(b) 20 在 21 前——委派/技能引用先捕获后压缩；(c) 17 的 `__user`/`__memory` 提醒形态是 21 压缩保留逻辑与 30 coalescing 的已知输入。
 
 ## 6. 键与常量速查
 | 常量 | 值 | 所在文件 |

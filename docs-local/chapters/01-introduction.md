@@ -1,6 +1,6 @@
 # 第 1 章　DeerFlow 是什么，为什么重要
 
-> 基于 DeerFlow 最新源码（本仓库 commit 2672e209，2026-09）编写。本仓库快照版本为 **2.1.0**（`backend/pyproject.toml` 与 `frontend/package.json` 同步锁定），MIT License。
+> 基于 DeerFlow 最新源码（本仓库 commit `11b339d6`，2026-10-01）编写。本仓库快照版本为 **2.2.0-dev**（`backend/pyproject.toml` 与 `frontend/package.json` 同步锁定为 2.2.0-dev；`backend/packages/harness/pyproject.toml` 仍为 2.1.0），MIT License。
 >
 > 本章所有路径、类名、端口、配置项均以当前源码为准。旧版图书基于 2026 年初的 2.0 早期结构写作（当时后端还是单层目录、无 harness/app 分层，技能声明方式与"11 层中间件"的说法均已过时），**本章已按最新代码重写校准**，请勿以旧书路径检索代码。
 
@@ -46,7 +46,7 @@ DeerFlow（**D**eep **E**xploration and **E**fficient **R**esearch **Flow）是�
 
 - **v1（2025-05 起）**：Deep Research 专用框架，接收研究问题→自动搜索→生成报告。
 - **2.0（2026-02-28）**：彻底重写，与 v1 **零代码共用**，发布当天登顶 GitHub Trending #1（README 顶部徽章区有官方记录）；v1 冻结在 `1.x` 分支继续维护。
-- **当前快照（2.1.0，2026-09）**：本仓库 commit `2672e209`，即本书编写基准。
+- **当前快照（2.2.0-dev，2026-10-01）**：本仓库 commit `11b339d6`，即本书编写基准。
 
 为什么 2.0 敢"推倒重来"？答案在下一节。
 
@@ -71,7 +71,7 @@ DeerFlow 瞄准的是 **Long-horizon Agent**——运行时间从分钟到小时
 
 | 特征 | 含义 | DeerFlow 的对应设计 |
 |------|------|--------------------|
-| **运行时间长** | 不是一问一答，而是持续执行分钟到小时级任务（一份 10–30 分钟的市场调研） | 每线程隔离的 checkpoint/run 生命周期（`packages/harness/deerflow/runtime/`）、上下文压缩与摘要中间件、`recursion_limit` 默认 1000 |
+| **运行时间长** | 不是一问一答，而是持续执行分钟到小时级任务（一份 10–30 分钟的市场调研） | 每线程隔离的 checkpoint/run 生命周期（`packages/harness/deerflow/runtime/`）、上下文压缩与摘要中间件、`recursion_limit` 默认 100（`max_recursion_limit` 为硬上限 1000） |
 | **自主决策** | Lead Agent 不是按预设流程跑的状态机，而是动态拆解、动态委派 | LangGraph 图 + 中间件链 + `task` 委派工具 + 计划模式（TodoList），见第 5 章 |
 | **产出"初稿"** | 目标是可继续修改的交付物（报告/网站/幻灯片/代码），不是一句话答案 | 文件工具 + 沙箱文件系统 + artifacts 前端卡片，输出落在线程的 `user-data/outputs` |
 
@@ -171,7 +171,7 @@ deer-flow/
 ├── docker/                         # docker-compose 文件、nginx 配置、provisioner
 ├── skills/                         # Agent 技能：public/（提交入库）、custom/（gitignored）
 ├── contracts/                      # 跨组件 JSON 契约（子代理状态、技能评审等）
-├── examples/deerflow-extension-example/  # 演示全部五类扩展贡献点的参考扩展
+├── examples/deerflow-extension-example/  # 演示多类扩展贡献点（middleware/task lifecycle/observer/service/router）的参考扩展
 ├── scripts/                        # Makefile 调用的根级编排脚本
 ├── tests/                          # 根级测试（当前为 skills 公共技能测试）
 └── docs/                           # 横切文档与设计笔记
@@ -204,19 +204,27 @@ from app.channels.service import start_channel_service
 # from app.gateway.routers.uploads import ...
 ```
 
-Harness 内部同样按子系统拆目录（`backend/AGENTS.md` 目录地图，摘录核心）：
+Harness 内部同样按子系统拆目录（以下基于 `backend/AGENTS.md` 目录地图与实际包结构整理，摘录核心）：
 
 ```
 backend/packages/harness/deerflow/
 ├── agents/            # LangGraph agent 系统
 │   ├── lead_agent/    # 主 agent（factory + 运行时组装的 system prompt）
 │   ├── middlewares/   # 中间件组件（内存/技能激活/摘要/令牌预算/…）
-│   ├── memory/        # 记忆抽取、队列、提示词；backends/（DeerMem/mem0/honcho/…）
+│   ├── memory/        # 记忆抽取、队列、提示词；backends/（DeerMem/mem0/honcho/openviking/noop）
+│   ├── task_continuity/       # 任务连续性（task_notes 通道、归档、工具）
+│   ├── interaction_policy.py  # RunInteractionPolicy（interactive/scheduled/webhook/autonomous）
+│   ├── human_input.py / goal_state.py  # 人工输入响应解析 / 目标状态
 │   └── thread_state.py# ThreadState schema
 ├── sandbox/           # 沙箱执行系统（sandbox.py 抽象 + local/ + tools.py 等）
 ├── subagents/         # 子代理委派（builtins/、executor.py、registry.py）
 ├── tools/builtins/    # 内置工具（present_file、ask_clarification、view_image、task、…）
 ├── mcp/               # MCP 集成（tools、cache、client、mcp_tasks 持久任务）
+├── capabilities/      # 声明式能力发现（catalog/business/runtime；执行仍归各自运行时）
+├── projects/          # 项目运行时（run 起始锚定上下文、文档、trash、工具）
+├── storage/           # 内容寻址 blob 存储（contract/manager/backends）
+├── typesafe/          # 共享 TypeSafe（Jev）客户端
+├── knowledge_scope.py / mcp_scope.py  # 知识检索作用域 / MCP 会话作用域契约
 ├── integrations/      # 受管一等集成安装器（如 Lark CLI 技能包）
 ├── extensions/        # Python 插件加载器/注册表/隔离
 ├── models/            # 模型工厂（thinking/vision 支持，多 provider）
@@ -278,7 +286,7 @@ DeerFlow 不只"说"，它有自己的"电脑"（README 原话：*DeerFlow doesn
 
 > *Most agents forget everything the moment a conversation ends. DeerFlow remembers.*（README）
 
-- **记忆后端**：默认本地后端 **DeerMem**（`agents/memory/backends/`，含容量驱逐策略评测 `backend/scripts/benchmark/deermem_eviction/`）；可选 `mem0`（托管/自托管 API）、`honcho`（服务端构建 user-model 记忆）、`openviking`（稳定 Session 捕获）。跨会话累积用户画像、偏好与知识，重复事实在写入时去重，全部本地存储、用户可控。
+- **记忆后端**：默认本地后端 **DeerMem**（`agents/memory/backends/`，含容量驱逐策略评测 `backend/scripts/benchmark/deermem_eviction/`）；可选 `mem0`（托管/自托管 API）、`honcho`（服务端构建 user-model 记忆）、`openviking`（稳定 Session 捕获）、`noop`（禁用记忆的空实现）。跨会话累积用户画像、偏好与知识，重复事实在写入时去重，全部本地存储、用户可控。
 - **中间件驱动**：记忆不是散落的工具调用，而是中间件链上的显式环节——`agents/middlewares/memory_middleware.py`、`summarization_middleware.py`、`token_budget_middleware.py`、`dynamic_context_middleware.py`（回忆的记忆作为隐藏上下文注入，不进 checkpoint）等。上下文工程由此成为可配置、可插拔的管线，而非 prompt 技巧。
 - **计划模式**：`config.configurable.is_plan_mode` 打开 TodoList 中间件，`write_todos` 工具跟踪多步任务，一个 in_progress + 实时更新。
 - **上下文压缩**：`summarization` 配置支持 tokens/messages/max-input 比例三种触发方式；手动压缩走 `POST /api/threads/{id}/compact`。
@@ -305,17 +313,17 @@ Lead Agent 可以按需派生子代理——每个子代理拥有**独立的上�
 ### 1.5.5 MCP 与 Python 扩展
 
 - **MCP**：`packages/harness/deerflow/mcp/`（tools、cache、client）提供 Model Context Protocol 客户端；server 配置放 `extensions_config.json`，由 Gateway API（`PUT/PATCH /api/mcp/config`）运行时管理。长时 MCP 操作走独立持久任务运行时（`McpTaskService` + `mcp_tasks`，租约式恢复），不进 agent 主循环。
-- **Python 扩展**：顶层 `config.yaml → plugins:` 列表（操作者控制、刻意不放 API 可写的 `extensions_config.json`）加载的第三方扩展可贡献**五类**东西：middleware、task lifecycle、system-model observers、Gateway services、FastAPI HTTP routers——参考实现见 `examples/deerflow-extension-example/`；公共契约独立成包 `backend/packages/extension-api/`（`deerflow_extension_api.*`）。管理命令：`deerflow extensions install/list/enable/disable/remove`（或根 `make extension-*`）。
+- **Python 扩展**：顶层 `config.yaml → plugins:` 列表（操作者控制、刻意不放 API 可写的 `extensions_config.json`）加载的第三方扩展可贡献**八类**注册面：middleware contributors、task-lifecycle contributors、system-model-call observers、agent-assembly observers、context-compaction observers、Gateway-lifetime services、eager routers，以及实验性的全栈 plugins（`registry.plugin()`）——参考实现见 `examples/deerflow-extension-example/`；公共契约独立成包 `backend/packages/extension-api/`（`deerflow_extension_api.*`）。管理命令：`deerflow extensions install/list/enable/disable/remove`（或根 `make extension-*`）。
 - **受管集成**：`integrations/` 提供一等集成安装器，如 Lark/Feishu CLI 技能包（admin 安装一次 → 全局共享、每用户独立启用与 OAuth 凭据），是"技能作为产品分发"的样板。
 
 ### 1.5.6 多平台 Gateway：REST + LangGraph 兼容 + IM
 
-Gateway（`backend/app/gateway/`）是 HTTP 面，路由组覆盖：threads、runs、models、memory、skills、uploads、artifacts、agents、subagents、scheduled_tasks、mcp、mcp_tasks、channels、channel_connections、integrations、suggestions、input_polish、auth、browser、github_webhooks、assistants_compat、console、feedback、subagent_batches 等（`app/gateway/routers/`）。它同时提供 **LangGraph 兼容层**（`langgraph_studio.py`、`assistants_compat.py`、`langgraph_auth.py`），让 LangGraph SDK/Studio 生态的客户端可以直接接入。
+Gateway（`backend/app/gateway/`）是 HTTP 面，路由组覆盖：threads、runs、models、managed_models、memory、skills、uploads、artifacts、agents、subagents、scheduled_tasks、mcp、mcp_tasks、personal_mcp、channels、channel_connections、integrations、suggestions、input_polish、auth、browser、github_webhooks、assistants_compat、console、feedback、subagent_batches、capabilities、knowledge、plugins、projects、project_documents、project_thread_files、trash、user_preferences 等（`app/gateway/routers/`）。它同时提供 **LangGraph 兼容层**（`langgraph_studio.py`、`assistants_compat.py`、`langgraph_auth.py`），让 LangGraph SDK/Studio 生态的客户端可以直接接入。
 
 IM 通道系统（`backend/app/channels/`，其 `AGENTS.md` 是最权威说明）：
 
 - **桥接架构**：通道与 Gateway 之间走 `langgraph-sdk` HTTP 客户端（与前端一致），内部客户端注入进程内 internal auth + CSRF 对，线程在服务端统一创建管理。
-- **官方渠道**：Feishu/Lark、Slack、Telegram、Discord、DingTalk（`backend/AGENTS.md` 列出的正式集），另有 GitHub（webhook 驱动，出站仅日志，agent 用沙箱内 `gh` CLI 主动回写）与 Buzz（Nostr relay，需要 `buzz` extra；NIP-42 认证 + pubkey 白名单，流式回帖用 kind-40003 原地编辑）。本快照 `app/channels/` 目录下还可见 `wechat.py`/`wecom.py` 等实现文件——是否启用以 `config.yaml` 配置与文档为准。
+- **官方渠道**：Feishu/Lark、Slack、Telegram、Discord、DingTalk（`backend/AGENTS.md` 列出的正式集），另有 GitHub（webhook 驱动，出站仅日志，agent 用沙箱内 `gh` CLI 主动回写）与 Buzz（Nostr relay，需要 `buzz` extra；NIP-42 认证 + pubkey 白名单，流式回帖用 kind-40003 原地编辑）。本快照 `app/channels/` 目录下还可见 `wechat.py`/`wecom.py`/`wechat_qr_login.py`（微信扫码登录）等实现文件，以及一批基础设施文件：`commands.py`（本地命令处理）、`connection_identity.py`（连接身份）、`dedupe_store.py`（入站去重）、`runtime_config_store.py`（运行时通道配置）、`sandbox_files.py`（沙箱文件）——是否启用以 `config.yaml` 配置与文档为准。
 - **消息流**：平台消息 → 通道实现 → `MessageBus.publish_inbound()` → `ChannelManager._dispatch_loop()` → 查/建线程 → `runs.stream()`/`runs.wait()`/`runs.create()`（按渠道策略选择增量更新、一次性回复或 fire-and-forget 长任务）→ 累积 AI 文本 → 出站。流式出站采用**白名单而非黑名单**（只发布 assistant 类型消息），防止隐藏模型上下文（`<memory>`、`<durable_context_data>` 等）泄漏到 IM。
 - **命令面**：`/new`、`/status`、`/models`、`/memory`、`/goal`、`/help` 等由 manager 本地处理或查 Gateway API。
 - 多用户与授权：`authz/`、`personal_access_tokens`、`auth/`（含 CSRF、internal auth、github OAuth 等），每用户的通道连接与凭据 SQL 持久化（`persistence/channel_connections`）。
@@ -363,8 +371,8 @@ DeerFlow 的"Harness"哲学意味着它交付执行骨架，而不是锁死行�
 | **Agent 层** | 定制行为/prompt/编排 | 换/包装 Lead Agent（`agents/lead_agent/`）、加中间件（`agents/middlewares/`，插进 LangGraph 链）、Custom Agent 定义 |
 | **Memory 层** | 接企业知识库/个性化记忆 | 换 memory backend（`agents/memory/backends/` 的 DeerMem/mem0/honcho 为范例） |
 | **Sandbox 层** | 适配私有化执行环境 | 实现 `sandbox.py` 抽象的新 Provider（`sandbox/local` 与 E2B 为范例），`sandbox.use` 切换 |
-| **Channel 层** | 对接内部 IM/业务系统 | 实现 `app/channels/base.py` 的 `Channel` 子类（feishu/slack/telegram 为范例）；或 Python 扩展贡献五类点 |
-| **整体** | 深度平台化 | Python `plugins:` 扩展（middleware/task lifecycle/observers/Gateway services/FastAPI routers）；或直接用 `create_deerflow_agent` + `DeerFlowClient` 把 harness 嵌进自己的应用，完全不要 Gateway/前端 |
+| **Channel 层** | 对接内部 IM/业务系统 | 实现 `app/channels/base.py` 的 `Channel` 子类（feishu/slack/telegram 为范例）；或 Python 扩展贡献各类注册面 |
+| **整体** | 深度平台化 | Python `plugins:` 扩展（middleware/task lifecycle/observers/Gateway services/routers/plugins 等八类注册面）；或直接用 `create_deerflow_agent` + `DeerFlowClient` 把 harness 嵌进自己的应用，完全不要 Gateway/前端 |
 
 ### 1.7.2 开箱即用的收益（选它的"省"）
 
@@ -372,11 +380,11 @@ DeerFlow 的"Harness"哲学意味着它交付执行骨架，而不是锁死行�
 2. **单一模型配置管理多 provider**：thinking/vision 探测、CLI-backed provider（Codex/Claude OAuth）、vLLM 本地推理都收敛在 `config.yaml → models:` 一份配置里。
 3. **LangGraph 兼容层白嫖生态**：SDK 客户端、Studio 调试、`/api/langgraph/*` 协议，前端与 IM 通道共用一套线程/运行语义。
 4. **架构纪律被测试钉死**：harness/app 单向依赖（`test_harness_boundary.py`）、端口绑定（`test_compose_default_bind_host.py`）、TDD 强制——意味着 fork 下去不容易烂尾。
-5. **MIT + 活跃社区 + 官方重写背书**：2.0 登顶 Trending 后迭代极快（本快照 2.1.0），且团队自身把"可扩展"当一等公民（官方 README 原话 *tear it apart and make it yours*）。
+5. **MIT + 活跃社区 + 官方重写背书**：2.0 登顶 Trending 后迭代极快（本快照 2.2.0-dev），且团队自身把"可扩展"当一等公民（官方 README 原话 *tear it apart and make it yours*）。
 
 ### 1.7.3 诚实提醒：选它的"代价"
 
-- **快迭代 = 配置/API 漂移**：2.x 仍在快速演进，`config.yaml` 键与路由可能在版本间变动；二次开发务必锁版本/锁 commit（本书即以 commit `2672e209` 为基准），升级前读 `CHANGELOG.md`。
+- **快迭代 = 配置/API 漂移**：2.x 仍在快速演进，`config.yaml` 键与路由可能在版本间变动；二次开发务必锁版本/锁 commit（本书即以 commit `11b339d6` 为基准），升级前读 `CHANGELOG.md`。
 - **Opinionated 默认**：预设的 Lead Agent 委派模式、技能渐进加载等约定，绕过时需要理解中间件链（本书第 5 章）。
 - **安全边界要靠部署兑现**：默认回环绑定（127.0.0.1:2026）、Local 沙箱非硬隔离、技能 `allowed-tools` 是 best-effort——对外暴露或处理不可信任务前，读根 `README.md` 的 ⚠️ Security Notice，并按文档启用 Docker/AIO、K8s provisioner 或 E2B。
 - **规模化要上 Postgres**：多 Gateway 实例（定时任务多实例、E2B Redis 容量所有权、调度器租约恢复）要求共享 Postgres + 相应开关（`scheduler.multi_instance`、`run_ownership.heartbeat_enabled`、`run_events.backend=db`），默认 SQLite 面向单机。
@@ -391,7 +399,7 @@ DeerFlow 的"Harness"哲学意味着它交付执行骨架，而不是锁死行�
 
 1. **核心机制层**：agent 与中间件链（本快照的中间件已重构，旧书"11 层"名单已过时，以 `agents/middlewares/` 当前清单为准）→ 运行时/checkpoint/流式 → 记忆 → 沙箱 → 子代理 → 技能 → MCP/扩展 → 上下文工程。
 2. **平台层**：Gateway REST/路由与 LangGraph 兼容层 → IM 通道逐渠道剖析 → 前端数据流 → 配置系统与部署。
-3. **二次开发实战**：自定义 skill、自研中间件/工具、扩展新 Sandbox Provider、对接新 IM 渠道、Python 插件五类贡献点、基于 `create_deerflow_agent` 的嵌入式集成。
+3. **二次开发实战**：自定义 skill、自研中间件/工具、扩展新 Sandbox Provider、对接新 IM 渠道、Python 插件各类贡献点、基于 `create_deerflow_agent` 的嵌入式集成。
 
 **代码导航惯例**（本书通用）：先读目标目录的 `AGENTS.md` → 再读 `AGENTS.md` 点名的核心文件 → 用 `backend/tests/` 里的同名测试反推行为契约。全书路径一律以当前仓库为准，不再出现旧书式的过期路径。
 

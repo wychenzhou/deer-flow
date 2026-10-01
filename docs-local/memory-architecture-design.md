@@ -310,7 +310,7 @@ agent_name ← 当前 Agent 名(默认 __default__)
 
 #### 5.2.1 correction / reinforcement 信号怎么识别
 
-信号是**确定性正则匹配**,不是 LLM 判断。`detect_signals` 只扫描**最近 6 条 HumanMessage**(`messages[-6:]`),用模式文件做 `regex.search`:
+信号默认是**确定性正则匹配,不是 LLM 判断**:`detect_signals` 只扫描**最近 6 条 HumanMessage**(`messages[-6:]`),用模式文件做 `regex.search`。另有一条**默认关闭**的可选增强——可插拔的**模型信号分类器**(`memory.signal_classification`)对同一批文本给出 `reinforcement` / `correction` 提示标签,并入提示文本(见 §10 扩展点总览);但强化确认门只读确定性信号集,模型标签写不出一条确认。
 
 ```
 correction.yaml(命中 → 用户纠正)            reinforcement.yaml(命中 → 用户认可)
@@ -1091,7 +1091,7 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 ## 10. 扩展点(如何接入自己的存储)
 
-整个记忆系统对"换实现"是**分层开放的**:从"换掉整套记忆逻辑"到"只换一条 prompt",有 6 个粒度递减的扩展点。改得越深,收益越大,但要遵守的契约也越多。先看总览:
+整个记忆系统对"换实现"是**分层开放的**:从"换掉整套记忆逻辑"到"只换一条 prompt",有 8 个粒度递减的扩展点。改得越深,收益越大,但要遵守的契约也越多。先看总览:
 
 | 扩展点 | 配置入口 | 需要写什么 | 粒度 |
 |---|---|---|---|
@@ -1100,7 +1100,11 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 | **换检索适配器** | `memory.backend_config.retrieval_adapter` | 一个 `RetrievalPort` 实现 | 只换"按关键词查事实" |
 | **自定义抽取模板** | `memory.backend_config.prompts_dir` | YAML prompt 文件 | 只换"模型怎么记" |
 | **自定义信号模式** | `memory.backend_config.patterns_dir` | YAML 正则文件 | 只换"识别哪些信号" |
+| **可插拔 pre-screen** | `memory.prescreen.use` | 一个 `MemoryPrescreenProvider`(类路径) | 只换"要不要花这次抽取调用"(成本闸门) |
+| **可插拔信号分类** | `memory.signal_classification.use` | 一个 `MemorySignalProvider`(类路径) | 只换"模型给出哪些信号提示" |
 | **观测钩子** | 程序注入 `callbacks` / `extraction_callback` | 一个类或函数 | 只加可观测性,不改行为 |
+
+> 最后两个扩展点(pre-screen / 信号分类)是**默认关闭的可选判官**:它们只影响"这次抽取要不要发、提示文本里多几条标签",既不 gate 执行、也不 gate 写入,所有失败方向都是"照常抽取",绝不替换 §5.5 的确定性写闸门。`off` 时连类路径都不解析,行为与没有该功能逐字节一致。详见 §A.9.2 的 `judge` 程序注入槽与 §A.9.1 的两个宿主槽。
 
 > 一条通用原则贯穿全章:**memory 是持久状态,任何解析/接入失败都必须 fail-loud**——绝不允许"配置写错了但静默回退到默认后端"这种悄悄把数据写进错误存储的行为。
 
@@ -1120,17 +1124,20 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 |---|---|---|---|
 | **Tier-1 抽象** | `add(thread_id, messages, ...)` / `get_context(user_id, ...)` | **必须** | 写(入队抽取)+ 读(返回注入文本)。这是后端的根本职责 |
 | **Tier-2 管理** | `add_nowait` / `search` / `get_memory` / `delete_memory` / `clear_memory` / `cancel_by_agent` / `import_memory` / `export_memory` / `shutdown_flush` | 可继承默认 | 默认抛 `NotImplementedError` 或给出安全默认;`add_nowait` 默认委托 `add`,`shutdown_flush` 默认 `True`(无缓冲就没得排空)。`delete_memory` / `export_memory` 属**零调用的死契约**(`/memory/export` 实际走 `get_memory`),默认 raise 只为保持接口可用 |
-| **Tier-3 可选钩子** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` / `on_pre_compress` / `on_turn_start` / `close` | 可继承默认 | 启动预热、手动 reload、事实 CRUD、以及两个**尚无调用方的预留钩子**(`on_pre_compress` 返回要注入压缩提示的文本;`on_turn_start` 轮次起始 nudge)——只覆盖你支持的那些 |
+| **Tier-3 可选钩子** | `warm` / `reload_memory` / `create_fact` / `delete_fact` / `update_fact` / `on_pre_compress` / `on_turn_start` / `refresh_judge` / `close` | 可继承默认 | 启动预热、手动 reload、事实 CRUD、两个**尚无调用方的预留钩子**(`on_pre_compress` 返回要注入压缩提示的文本;`on_turn_start` 轮次起始 nudge),以及判官热重载钩子 `refresh_judge`(重载 `memory.prescreen` / `memory.signal_classification` 时替换注入的判官)——只覆盖你支持的那些 |
 | **异步(投机性)** | `aadd` / `aget_context` / `asearch` | 可继承默认 | 默认**同步委托**,没有并发收益;只为将来换 async LLM 客户端时不改契约而预留。今天的调用方走同步路径,但网络后端**应当**覆盖它们(见 §10.1.5) |
 
 构造入口是**类方法** `from_config(backend_config, *, mode, **host_hooks)`,由工厂调用而不是直接 `cls(...)`——这样每个后端自己决定怎么组装依赖、消费哪些 host hook。
 
-两个**类级声明**(ClassVar,不是字段):
+三个**类级声明**(ClassVar,不是字段):
 
 | 声明 | 含义 |
 |---|---|
 | `supports_search: ClassVar[bool]` | 是否实现了 `search()`。默认 `False`;实现了就必须设 `True`,否则实例化时不变式校验直接抛错(`mode="tool"` 强制要求 search 支持) |
+| `supports_agent_scoped_management: ClassVar[bool]` | 是否接受 Gateway 带 `agent_name` 的按 Agent 作用域管理读写(读/reload/import-export/clear/单事实 CRUD)。默认 `False`;为 `False` 时作用域管理请求返回 501,而不是静默落到用户默认桶/全局桶 |
 | `requires_passive_writes_in_tool_mode: ClassVar[bool]` | `mode: tool` 下是否仍需要 `MemoryMiddleware` 被动抽取。默认 `False`(工具模式完全模型主导);设 `True` 的后端(如 openviking:搜索靠工具、持久写靠对话抽取)在工具模式下会**保留** `MemoryMiddleware`,形成"工具搜索 + 被动抽取"混合模式(§11.2) |
+
+公共错误类型也是契约的一部分:`MemoryManagerError` 基类派生 `MemoryReadError`(严格读必须成功时抛,调用方须传播)/ `MemoryConflictError`(乐观锁竞争失败)/ `MemoryCorruptionError`(持久数据不可安全读)。DeerMem 把存储层冲突转换为这些公共类型;Gateway 映射冲突为 **HTTP 409**、损坏为**稳定 HTTP 500**。
 
 **契约的三个刻意中立点**(想清楚再实现,别照搬 DeerMem 的假设):
 
@@ -1354,7 +1361,7 @@ class RetrievalPort(Protocol):
 ```
 facts_extracted / facts_passed_confidence / rejected_low_confidence /
 rejected_by_scope_gate / scope_gate_rejections / thread_id / model_name /
-token_usage / success
+token_usage / success / prescreen / signal_classification / skip_vetoed_by_model_signal
 ```
 
 `scope_gate_rejections` 是**按原因分桶**的(`missing`/`scope`/`durability`/`authority`),拒绝率过高说明抽取 prompt 或阈值退化——这正是在 prompt 或模板改坏时(§10.3)第一时间暴露问题的信号。替换成自己的回调时:异常永不向上抛(DeerMem 侧已包了 try)。
@@ -1895,6 +1902,10 @@ backend/.deer-flow/users/{user_id}/.retrieval/
 | `shutdown_flush_timeout_seconds` | 30.0(1-300) | 优雅停机时排空待处理更新的硬预算;每个待处理项一次 LLM 调用 |
 | `manager_class` | `deermem` | 后端选择器:注册短名或 dotted 路径(§10.1.2) |
 | `backend_config` | `{}` | 传给后端 `__init__` 的私有配置 dict |
+| `prescreen` | `{mode: "off"}` | 抽取前的**成本闸门**槽:`mode`(off/shadow/enforce)+ `use`(provider 类路径)+ `config`。off 时不解析、不构造、不校验凭证 |
+| `signal_classification` | `{mode: "off"}` | **模型信号提示**槽:`mode`(off/shadow/hints)+ `use` + `combine`(auto/always/never)+ `config`;hints 时把模型标签并入提示文本,并在 pre-screen enforce 下可否决一次 skip |
+
+> `prescreen` / `signal_classification` 是**可选判官**的两个宿主槽(默认全 off,详见 §10 的扩展点总览)。它们的连接 / model / 凭证默认值来自**顶层 `typesafe:` 块**(所有 TypeSafe/Jev 消费者共享;未配置则用内建默认),每个槽的 `config` 可逐字段覆盖。`mode != off` 但缺 `use` 会在配置加载期报错(fail-loud,绝不"看起来配了实则空转")。
 
 ### A.9.2 DeerMem 私有字段(`memory.backend_config.*`)
 
@@ -1976,10 +1987,11 @@ backend/.deer-flow/users/{user_id}/.retrieval/
 |---|---|---|
 | `model` | 嵌套子配置 | 抽取 LLM 的 `provider` / `model` / `api_key` / `base_url` / `temperature` |
 | `host_llm` | `null` | 宿主注入的现成 chat model(零配置 UX);优先级高于 `model` |
+| `judge` | `null` | 宿主注入的记忆判官 `judge(context) -> MemoryBatchVerdict`:pre-screen 决定这批是否值得抽取 + 信号分类提供提示标签。`None` = 不判,抽取路径与没有该功能逐字节一致;由工厂按 `memory.prescreen` / `memory.signal_classification` 构建(见 §10 扩展点总览) |
 | `extraction_callback` | `null` | 抽取后的观测回调(§10.5) |
 | `should_keep_hidden_message` | `null` | 决定 `hide_from_ui` 消息是否保留(§4.2) |
 | `trace_context_manager` | `null` | 把 `trace_id` 绑进抽取线程的 ContextVar,让日志/追踪可关联 |
 
 ---
 
-*本文对应代码:`backend/packages/harness/deerflow/agents/memory/`。字段/策略均与当前实现一致;若代码演进,以代码为准。*
+*本文对应代码:`backend/packages/harness/deerflow/agents/memory/`(含 `judging.py` / `prescreen/` / `signals/`)。字段/策略已按当前实现校准(含默认关闭的可选 pre-screen 成本闸门与模型信号分类);若代码演进,以代码为准。*

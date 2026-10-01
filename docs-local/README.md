@@ -7,9 +7,11 @@
 
 | 路径 | 内容 |
 |------|------|
-| `middleware/` | 中间件源码详解（8 篇，中文）；含[总索引](middleware/README.md)——链位 1–35 → 篇目映射 |
+| `chapters/` | 《DeerFlow 深度说明书》18 章 + 3 附录（中文）；见[目录](chapters/README.md) |
+| `middleware/` | 中间件源码详解（8 篇，中文）；含[总索引](middleware/README.md)——链位 1–39 → 篇目映射 |
 | `STARTUP.md` | 项目启动指南（中文） |
-| `warm-sun-theme-plan.md` / `warm-sun-theme-design.md` | 活力暖阳主题实施计划与设计规范 |
+| `memory-architecture-design.md` | 长期记忆架构设计规范（中文） |
+| `warm-sun-theme-design.md` | 活力暖阳主题设计规范 |
 | `checkpoint-tables.md` | LangGraph Checkpoint 表结构详解 |
 | `scripts/` | 辅助脚本（聊天历史获取、SQL 查询） |
 
@@ -17,5 +19,5 @@
 
 - 本目录内容**不随上游同步**，属于 fork 维护者自有。
 - 新增自有文档一律放入本目录，不要写进 `docs/` 或 `backend/docs/`。
-- 技能包（`skills/kami`、`skills/dws`、`skills/qcdoc-finance`）是功能代码，
+- 技能包（`skills/public/kami`、`skills/public/dws`、`skills/qcdoc-finance`）是功能代码，
   按惯例保留在 `skills/` 下，不属于本目录。

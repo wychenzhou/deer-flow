@@ -1,16 +1,16 @@
 # 12 · Sandbox 抽象与实现:代码执行的隔离边界与 Provider 生态
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10)编写
 > 代码引用根:`backend/packages/harness/deerflow/`(下文省去前缀);远程 Provider 在
-> `community/{aio_sandbox,opensandbox,boxlite,tenki}/`。模块内权威说明先读
-> `sandbox/AGENTS.md`(104 行,接口/Provider/虚拟路径/工具四段)与 harness 级
-> `AGENTS.md` 的 "Sandbox System" 一节。
+> `community/{aio_sandbox,e2b_sandbox,opensandbox,boxlite,tenki}/`。模块内权威说明先读
+> `sandbox/AGENTS.md`(120 行:网络审批策略/接口/Provider 模式/共享组件/执行租约/
+> 授权门/虚拟路径/工具诸节)与 harness 级 `AGENTS.md` 的 "Sandbox System" 一节。
 
 Sandbox 是 DeerFlow 里**唯一会真正执行任意代码**的子系统:模型产出的 bash 命令、
 文件读写、结构化搜索最终都落在这里。本章讲清四件事——这个抽象为什么长这样(§1)、
 统一接口长什么样(§2)、Provider 与工厂如何把"隔离"变成可插拔策略(§3)、
 以及执行期状态机(中间件 + 租约)如何决定"谁拿沙箱、谁放沙箱"(§4)。
-§5–§8 分别讲身份令牌、路径契约、密钥剥离与五个 Provider;§9 用一句话把
+§5–§8 分别讲身份令牌、路径契约、密钥剥离与六个 Provider;§9 用一句话把
 命令审计和路径纵深指到对应深文。
 
 ---
@@ -44,9 +44,9 @@ shell 里装依赖、跑测试、起服务、改文件,再用读回的结果决�
 
 ---
 
-## 2. Sandbox 统一接口:一次定义,五个实现
+## 2. Sandbox 统一接口:一次定义,六个实现
 
-抽象基类 `Sandbox`(`sandbox/sandbox.py`,ABC)定义全部能力。它有九个方法:
+抽象基类 `Sandbox`(`sandbox/sandbox.py`,ABC)定义全部能力。它有十个方法:
 
 | 方法 | 签名要点 | 语义 |
 |---|---|---|
@@ -87,8 +87,9 @@ shell 里装依赖、跑测试、起服务、改文件,再用读回的结果决�
   (见 §4/§8)。
 - **异常契约在 docstring 里钉死**。`download_file` 明确:路径穿越或落在虚拟前缀
   之外要抛 `PermissionError`;文件不存在/不可读要抛 `OSError`——**本地和远程
-  实现必须统一**,调用方只处理一个异常类型。`read_file` 等对越界路径同理
-  (§6 展开)。
+  实现必须统一**,调用方只处理一个异常类型。`read_file` 等对越界路径同理;
+  `list_dir` 对缺失路径抛 `FileNotFoundError`、对命令/客户端失败抛 `OSError`,
+  **绝不返回 `[]` 掩盖失败**(§6.4 展开)。
 
 ### 2.1 这个接口"刻意缺什么"
 
@@ -116,20 +117,35 @@ class SandboxProvider(ABC):
     def acquire(self, thread_id=None, *, user_id=None) -> str      # 拿环境,返回 id
     async def acquire_async(self, thread_id=None, *, user_id=None) -> str
     def get(self, sandbox_id: str) -> Sandbox | None               # 按 id 取活实例
+    def get_scoped(self, sandbox_id, *, thread_id, user_id) -> Sandbox | None  # 身份域内取
     def release(self, sandbox_id: str) -> None                     # 释放/销毁
     def reset(self) -> None                                        # 清缓存状态
     def sync_agent_skills(self, sandbox_id, *, thread_id, user_id, projection)  # 默认 no-op
+    async def sync_agent_skills_async(...)                         # to_thread 包一层,持租约到完成
+
+    # —— 出站网络审批(allowlist 模式的受信代理,§4.5)——
+    def sandbox_network_mode(self) -> str                          # 默认 "open"
+    def sandbox_network_temporary_grant_ttl(self) -> int           # 默认 300s
+    def consume_network_policy_events(self, sandbox_id) -> list[dict]  # 认领最早的未上报事件
+    def deny_pending_network_policy_events(self, sandbox_id) -> bool   # 原子拒绝所有待批事件
+    def decide_network_policy_request(self, sandbox_id, request_id, decision) -> bool  # 应用用户决定
 ```
 
 - **异步路径**:`acquire_async` 基类实现是 `asyncio.to_thread(self.acquire, ...)`。
   Docker 创建、容器发现、跨进程锁、就绪轮询、释放全是阻塞 IO,必须滚出事件循环;
-  AIO/E2B 等重 Provider 还覆盖成带序列化的版本(§5)。
+  AIO/E2B/BoxLite/Tenki/OpenSandbox 等重 Provider 都覆盖成带序列化的版本(§5)。
+- **`get_scoped` 是身份域内的非阻塞查**:它与 `get` 的区别是额外校验沙箱**确实属于**
+  传入的 `(user_id, thread_id)`——基类默认 fail closed 返回 `None`,调用方据此回退到
+  规范的 `acquire`。恢复 checkpoint 里持久化的沙箱 id 前必须先过 `get_scoped`,防止
+  复用一个已不属于本身份(或已被别的线程接手)的容器/VM(§4/§8)。AIO 读的是自己
+  的 active 身份映射,`get()` 本身仍是纯内存查询。
 - **能力位声明**:`supports_agent_skill_isolation=True` 表示该 Provider 能在整个
   Agent 工具面强制 lead Agent 的显式技能策略。bind-mount 型 Provider(目录挂载
   即生效)继承 no-op 的 `sync_agent_skills`;上传型 Provider(E2B、部分远端)
-  覆盖它把"线程技能投影"上传进沙箱。宿主型 Provider 只要启用的 shell 能绕过
-  路径映射就必须报 `False`——**显式策略 + 不支持隔离的 Provider 组合,中间件在
-  acquire 之前就 fail closed 抛 `SandboxRuntimeError`**,绝不让策略静默失效。
+  覆盖它把"线程技能投影"上传进沙箱,并用 `sync_agent_skills_async` 在清理+上传
+  全程持有租约。宿主型 Provider 只要启用的 shell 能绕过路径映射就必须报 `False`
+  ——**显式策略 + 不支持隔离的 Provider 组合,中间件在 acquire 之前就 fail closed
+  抛 `SandboxRuntimeError`**,绝不让策略静默失效。
 - **release 不一定是销毁**:远程 Provider 把"释放"解释成"**进 warm pool 待命**"
   (§8),下次同一用户/线程 acquire 直接复用,省掉冷启动。
 
@@ -258,6 +274,38 @@ tools.py 的 `ensure_sandbox_initialized*` 直接改 `runtime.state["sandbox"]`,
 `ToolMessage` 包成 `Command(update={"sandbox": {...}, "messages": [msg]})`(或并进
 已有 dict update,保留 goto/graph/resume 等字段),让沙箱 id 正式落图。
 
+同一对 `wrap_tool_call`/`awrap_tool_call` 还负责网络审批的**抛出侧**(§4.5)。
+
+### 4.5 网络审批策略:allowlist 模式下的裁决与自动拒绝
+
+当 Provider 的 `sandbox_network_mode()` 返回 `"allowlist"`(受信代理只放行白名单
+出站),一次工具调用触发的被拦截网络事件必须交给用户裁决。`SandboxMiddleware` 用
+`resolve_run_interaction_policy` 把"能不能弹卡"与"这次到底放不放行"分开:
+
+- **能否弹卡**:`_network_approval_is_non_interactive(context)` 读
+  `resolve_run_interaction_policy(...).allows_clarification`。**非交互运行**
+  (webhook、scheduled、legacy unattended、GitHub fallback 等)一律**自动拒绝**;
+  subagent(`context["is_subagent"]`)同理。两者都直接调
+  `deny_pending_network_policy_events` 原子排空待批事件——绝不给没有人类回应者的
+  运行弹卡。
+- **交互抛出**:`consume_network_policy_events` 认领最早的未上报事件,中间件把它
+  渲染成一张 `risk_confirmation` 单选卡(消息 id 形如 `sandbox-network:{request_id}`),
+  三个选项:`deny` / `allow_temporary`(默认 TTL 300s,可经
+  `sandbox_network_temporary_grant_ttl` 调整)/ `allow_sandbox`;私网、loopback、
+  link-local、组播、云 metadata 地址**永不批准**。结果以 `Command(goto=END)` 中断
+  本回合等用户选择。
+- **决定回放**:下一次 `before_agent`/`abefore_agent` 开头调
+  `_apply_network_policy_response`,从**最新一条** HumanMessage 的
+  `read_human_input_response` 取出决定(只认 `sandbox_network` 源,且必须是当前
+  用户轮——旧卡绝不重放)。非 allowlist 模式直接 no-op;否则经
+  `decide_network_policy_request(sandbox_id, request_id, decision)` 落回 Provider:
+  选项 id 非法抛 `SandboxRuntimeError("Invalid sandbox network approval response")`,
+  决定过期或不属于该沙箱(返回 False)也抛 `SandboxRuntimeError`。已应用的
+  `(sandbox_id, request_id, decision)` 三元组记进 context,重复提交幂等。
+
+> 这套表面与 §3.1 的那组网络审批方法一一对应:能力位在 Provider,裁决流程在
+> `SandboxMiddleware`,交互卡沿用澄清机制的 `risk_confirmation`。
+
 ---
 
 ## 5. 隔离令牌与身份:远程资源的确定性寻址
@@ -357,6 +405,31 @@ raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directo
 - subagent **不是投影 owner**:复用 lead 的线程文件系统视图,绝不用自己的
   发现/激活策略重建它(§4.1 的 `owns_agent_skill_projection=False`)。
 
+### 6.4 读/列/搜的共享契约:三个契约模块 + `list_dir` 的异常语义
+
+远程 Provider 的"读/列/搜"不再各自手写 shell,而是共用 `sandbox/` 下的三个契约模块:
+
+- **`sandbox/read_file_contract.py`**:`read_file` 及其**只做展示**的消费者共用的一组
+  文本标记(`READ_FILE_EMPTY = "(empty)"`、`READ_FILE_START_LINE_EXCEEDS`、行区间
+  非法的几个标记、`READ_FILE_TRUNCATION_PREFIX` 等)与 `count_file_lines()`。后者按
+  `count("\n") + 非换行结尾补 1` 计行,与 `LocalSandbox.read_file` 的文本模式迭代、
+  以及 `_truncate_read_file_output` 的公式**逐字节对齐**——这正是 ReadBeforeWrite 门
+  报出的行数能被模型直接回填进 `start_line`/`end_line` 的前提(它刻意不像
+  `splitlines()` 那样把 `\f`/`\v`/`\x85` 当行分隔符)。
+- **`sandbox/remote_search.py`**:远程 `grep`/`glob` 的 `sh -lc … | head` 包装与状态
+  契约。POSIX `sh` 没有 `pipefail`、搜索的 stderr 被丢弃,于是"搜索根不存在 /
+  `grep`/`find` 二进制缺失(127)/ 树不可读"会和"真的没匹配"一样退化成空输出 + 退出 0
+  (#5376)。该模块**先检查根、再在受限输出之后记录搜索命令自身的状态**,用
+  `__DF_SEARCH_STATUS__:` 标记区分:缺根 → `FileNotFoundError`,搜索失败 → `OSError`,
+  只有真正的 no-match 才返回 `[]`;`head` 截断触发的 SIGPIPE(141)算成功截断。
+- **`sandbox/remote_list_dir.py`**:远程 `list_dir` 的同款契约(标记
+  `__DF_FIND_STATUS__:missing`、默认 500 条上限、先剪枝忽略目录),让"根缺失"与
+  "遍历失败"在无任何输出时也能区分。
+
+配合 §2 的异常契约:**`list_dir` 现在对缺失路径抛 `FileNotFoundError`、对命令/客户端
+失败抛 `OSError`,不再用 `[]` 掩盖失败**(`ls_tool` 只把"确实存在的空目录"渲染成
+`(empty)`);本地与远程实现统一到这两种异常类型,调用方不必再猜空列表的含义。
+
 ---
 
 ## 7. 密钥剥离:宿主的秘密不进沙箱
@@ -386,13 +459,16 @@ Local 把它并进宿主子进程环境;AIO 用全新 `bash.exec(env=...)` 会�
 
 ## 8. 各 Provider 一览
 
-五个官方实现,隔离强度从"零 OS 边界"到"独立内核"。选择即取舍:Local 零冷启动
-但无隔离;AIO 默认 Docker 平衡;BoxLite/Tenki 微 VM 更强隔离;OpenSandbox 托管
-云盒。共享的 warm-pool 生命周期(`community/warm_pool_lifecycle.py` 的
-`WarmPoolLifecycleMixin`)统一了远程 Provider 的"释放进池、按需复用":公共默认
+六个官方实现,隔离强度从"零 OS 边界"到"独立内核 / 云微 VM"。选择即取舍:Local
+零冷启动但无隔离;AIO 默认 Docker 平衡;BoxLite/Tenki/E2B 微 VM 更强隔离;
+OpenSandbox 托管云盒。其中 **AIO / OpenSandbox / BoxLite / Tenki 四个共享**
+warm-pool 生命周期(`community/warm_pool_lifecycle.py` 的
+`WarmPoolLifecycleMixin`)统一了"释放进池、按需复用":公共默认
 `DEFAULT_IDLE_TIMEOUT=600`、`IDLE_CHECK_INTERVAL=60`、`DEFAULT_REPLICAS=3`,
 mixin 拥有 idle-checker 线程、warm 过期、最老淘汰、副本计数与软上限日志;
 Provider 自留 active 注册表、创建/发现、健康检查与销毁钩子 `_destroy_warm_entry`。
+**E2B 不套这个 mixin**——它自持一套 `OrderedDict` warm pool 与 reconciliation,
+所以"远程四个共享 mixin"只对上面四个成立(§8.6)。
 配置位:`sandbox.use`(类路径)、`sandbox.replicas`、`sandbox.idle_timeout`。
 
 ### 8.1 LocalSandboxProvider — 宿主直跑,零隔离边界
@@ -471,6 +547,25 @@ grep)才 shell 到 busybox 可移植 `find`/`grep`,用共享的 `deerflow.sandbo
 `BrokenPipeError`/`EOFError`)经 `_invalidate_sandbox` 逐出死微 VM;
 **跨进程孤儿对账是 follow-up**——今天只有单进程 warm pool。
 
+### 8.6 E2BSandboxProvider — E2B 云沙箱,自带 warm pool(community/e2b_sandbox/)
+
+**隔离原理**:每个沙箱 = 一个 E2B(cloud)code-interpreter 微 VM,经 `e2b` SDK
+远程连接;`supports_agent_skill_isolation = True`(§3.1),远程无共享宿主文件系统,
+必须显式 upload 同步。**关键坑**:它**不继承** `WarmPoolLifecycleMixin`,而自持一份
+`OrderedDict` warm pool、active 注册表、`AcquireSerializer[(user_id, thread_id,
+skills_root)]` 与周期性 reconciliation;沙箱身份 = `derive_sandbox_scope_token` 再
+叠 `skills_root` 派生(§5,`sha256(f"{base_scope}\0{skills_root}")[:16]`),所以换
+`skills.container_path` 会让旧 VM 不被收养、进入宽限期后回收。新建无策略沙箱走一次性
+upload(公开/custom/legacy/集成四类投影);显式策略 run 在 acquire 后由
+`sync_agent_skills` **严格清空再上传**签名投影、并删掉旧的沙箱内签名标记(不盲信远端
+树完好),且与 acquire/release 共用同一 per-user/thread+skills-root 串行器,防重叠同步
+把一次 wipe 和另一次上传交织。容量:`replicas` 在 memory ownership 下只管本进程,
+redis ownership 共享 `<prefix>:e2b-capacity` Hash(Lua 原子管理 VM 与 in-flight create,
+状态缺失即 fail closed);`overflow_policy: wait|reject|burst`(`wait` 超
+`acquire_timeout` 失败、`reject` 可先逐一个 warm VM 再报错、`burst` 加 `burst_limit`
+额度)。孤儿对账按 page/item/time 预算列出 provider-tagged 远端沙箱,只在配置的
+宽限/TTL 后、且原子 `del:` 认领成功才回收;`reset()` 等同完整 shutdown 语义。
+
 ---
 
 ## 9. 命令审计与路径纵深:一句话指路
@@ -488,13 +583,18 @@ ToolReceipt 的先后关系,以及错误 ToolMessage 的恢复语义,属于
 
 ## 附:本章速查
 
-- 接口 `Sandbox`(sandbox/sandbox.py):9 个方法 + scope 透传钩子 +
-  `persistent_shell_sessions` 三态声明;env 键过 POSIX 校验。
+- 接口 `Sandbox`(sandbox/sandbox.py):10 个方法 + scope 透传钩子 +
+  `persistent_shell_sessions` 三态声明;env 键过 POSIX 校验;`list_dir` 缺路径抛
+  `FileNotFoundError`、失败抛 `OSError`(不再返回 `[]`)。
+- Provider `SandboxProvider`:除 `acquire/get/release/reset` 外,还有身份域内的
+  `get_scoped`(非阻塞内存查,miss 回退 `acquire`)、`sync_agent_skills(_async)`,
+  以及 allowlist 出站网络审批的四个方法(§4.5)。
 - 工厂 `get_sandbox_provider()`:双检锁单例,动态类解析与构造在锁外,
   孤儿实例 shutdown 回收;reset/shutdown 摘引用在锁内、回调在锁外。
 - 中间件 `SandboxMiddleware`:lazy 默认;eager 只发生在策略投影或显式配置;
   authz 拒绝→共享视图跳过、策略视图 raise;fork_restored 的 Overwrite 包装
-  **不 retain、不 release**;懒获取的 id 经 wrap_tool_call 的 Command 更新落图。
+  **不 retain、不 release**;懒获取的 id 经 wrap_tool_call 的 Command 更新落图;
+  allowlist 网络事件→非交互/subagent 自动拒绝,交互走 `risk_confirmation` 卡(§4.5)。
 - 租约 `SandboxLeaseManager`:普通 owner release_on_last,借用 holder(上传/
   fork)不请求 park;最后 holder 执行 provider.release(远程=进 warm pool);
   release 幂等、取消安全、外层围栏重复释放。
@@ -502,10 +602,12 @@ ToolReceipt 的先后关系,以及错误 ToolMessage 的恢复语义,属于
   `AcquireSerializer` 串行化同键生命周期迁移。
 - 路径:`/mnt/user-data/{workspace,uploads,outputs}` + `/mnt/acp-workspace`
   (+ 策略下 `/mnt/skills`);Local 映射翻译 + 逃逸 PermissionError,输出反向
-  掩码;不是安全边界。
+  掩码;不是安全边界。读/列/搜共用 `read_file_contract.py`、`remote_search.py`、
+  `remote_list_dir.py` 三个契约模块(§6.4)。
 - 密钥:`env_policy.build_sandbox_env` 默认剥离 \*KEY\*/\*SECRET\*/\*TOKEN\*/
   \*PASS\*/\*CREDENTIAL\*/\*DSN\* + 精确名单,再叠请求级 env。
 - Provider:Local(宿主 bash、LRU 256、无边界)/ AIO(Docker + scope 会话 +
   ownership store + bash.exec 镜像门槛)/ OpenSandbox(托管、每次 fresh)/
-  BoxLite(微 VM、私有事件循环桥)/ Tenki(云微 VM、原生 fs API、非特权用户);
-  远程四个共享 WarmPoolLifecycleMixin(idle 600s、replicas 3)。
+  BoxLite(微 VM、私有事件循环桥)/ Tenki(云微 VM、原生 fs API、非特权用户)/
+  E2B(云沙箱、自带 warm pool + reconciliation);**AIO/OpenSandbox/BoxLite/Tenki
+  四个共享 WarmPoolLifecycleMixin**(idle 600s、replicas 3),E2B 不用该 mixin。

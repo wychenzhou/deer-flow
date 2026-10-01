@@ -1,6 +1,6 @@
 # 04 LangGraph 引擎与运行模型
 
-> 基于 DeerFlow 最新源码（本仓库 commit 2672e209，2026-09）编写。
+> 基于 DeerFlow 最新源码（本仓库 commit `11b339d6`，2026-10-01）编写。
 > 本章代码位于 `backend/packages/harness/deerflow/`（图与装配）、
 > `backend/packages/harness/deerflow/runtime/`（运行引擎）与
 > `backend/app/gateway/`（Gateway 接入面）。
@@ -59,6 +59,10 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    tool_artifacts: Annotated[list[ArtifactEntry], merge_tool_artifacts]
+    tool_artifact_processed: Annotated[list[str], merge_artifacts]
+    task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
+    task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
 ```
@@ -75,6 +79,11 @@ class ThreadState(AgentState):
 | `promoted` | `merge_promoted` | 延迟工具提升表，按 `catalog_hash` 作用域：hash 变了整体替换（防漂移后旧名字暴露新工具），同 hash 则并集去重 |
 | `delegations` | `merge_delegations` | 委托台账：同 id 后者胜但保留首见顺序；**终态永不被非终态降级**；封顶最近 50 条（`_DELEGATION_LEDGER_MAX_ENTRIES`） |
 | `skill_context` | `merge_skill_context` | 技能引用按 `path` 去重、最近读取者排前、封顶 8 条、description 截断 500 字符；存的是"引用"而非 SKILL.md 正文 |
+| `tool_artifacts` | `merge_tool_artifacts` | 工具产物句柄注册表（`ArtifactEntry`）：按 `handle` 以最新版替换、保留首见顺序；末位 `{"op": "trim_to", "keep": N}` 指令把上限做成滑动窗口，绝对上限 1000 |
+| `tool_artifact_processed` | `merge_artifacts` | 已处理的产物句柄列表：追加去重保序 |
+| `task_notes` | `merge_task_notes` | 有界的模型报告式笔记（`TaskNotesChannel`）：校验/归一化，封顶 8 条、单条 750 字符、至多 4 个来源 |
+
+`task_history`（`NotRequired[dict | None]`）无自定义 reducer，是持久化的有界连续性历史（scope/batches/status），读取前经 `normalize_task_history` 校验。reducer 集合被 `THREAD_STATE_REDUCER_FIELDS` 冻结，现为 **12 项**：messages、sandbox、artifacts、todos、goal、viewed_images、promoted、delegations、skill_context、tool_artifacts、tool_artifact_processed、task_notes。
 
 ### 4.1.3 delta 模式：DeltaThreadState 与 DeltaChannel
 
@@ -94,7 +103,7 @@ class DeltaThreadState(ThreadState):
     messages: DELTA_MESSAGES_FIELD
 ```
 
-`merge_message_writes`（thread_state.py:323）是 delta 写入的折叠规约：把当前
+`merge_message_writes`（thread_state.py:402）是 delta 写入的折叠规约：把当前
 消息态归一化一次，再用 message-id 位置索引按序折叠每次写入、延迟墓碑压缩，线性
 时间复刻公开 `add_messages` 的全部语义——重复 id、原位替换、删除报错、
 `REMOVE_ALL_MESSAGES`、空写入报错、缺 id 分配顺序——不重扫累积态。LangGraph
@@ -120,6 +129,19 @@ class DeltaThreadState(ThreadState):
 messages。反向允许：delta 进程透明读 full checkpoint（旧快照播种 delta channel），
 所以 full → delta 是平滑迁移；delta → full 必须先物化数据。
 
+### 4.1.4 与状态相关的新增 agents 子系统
+
+本轮合并新增了几个与线程状态/运行交互相关的 `agents/` 子系统：
+
+- `agents/interaction_policy.py`：`RunInteractionPolicy`（`resolve_run_interaction_policy`）
+  把一次 run 的交互模式归为 `interactive` / `scheduled` / `webhook` / `autonomous`——
+  调度与 webhook 触发天然非交互，澄清段措辞随之切换。
+- `agents/human_input.py`：解析澄清类人工输入响应（文本 / 选项），供澄清中间件消费。
+- `agents/goal_state.py`：`GoalState` / `GoalEvaluation`，自主目标状态机与评估的 schema。
+- `agents/task_continuity/`：任务连续性——`state.py` 提供 `task_notes` / `task_history`
+  的归一化与 reducer（见上表），`archive.py` 持久化有界历史，`tools.py` 提供
+  `task_note` / `history_search` / `history_read` 三个工具。
+
 ---
 
 ## 4.2 图结构：create_agent 抽象构建
@@ -134,7 +156,7 @@ messages。反向允许：delta 进程透明读 full checkpoint（旧快照播�
 行为——DeerFlow 把"图长什么样"外包给框架，"图怎么表现"全部收进中间件
 （第 6 章专述）。
 
-真实构建点有两处（agent.py:1056-1062 bootstrap agent、1174-1180 默认 agent，
+真实构建点有两处（agent.py:1232 bootstrap agent、1378 默认 agent，
 两段同构）：
 
 ```python
@@ -155,7 +177,7 @@ graph = create_agent(
 - `state_schema=` 显式传入状态 schema——这是图与 4.1 状态设计的咬合点；
 - `checkpointer` **不在编译期绑定**：graph 对象本身无状态，持久化由执行层把
   checkpointer 放进运行 config 驱动（见 4.4/4.5）；
-- 调用前完成的决定性装配（都在 `_assemble_lead_agent`，agent.py:869 起）：
+- 调用前完成的决定性装配（都在 `_assemble_lead_agent`，agent.py:953 起）：
   runtime config 解析（`model_name`/`is_plan_mode`/`thinking_enabled`/子代理开关）、
   `resolve_config_user_id` 定身份、`_resolve_model_name` + `_authorize_model_name`
   定模型并做授权降级、`apply_tool_authorization` 过滤工具、`apply_prompt_template`
@@ -165,7 +187,7 @@ graph = create_agent(
 ### 4.2.2 图的"可观察形状"：assembly descriptor
 
 执行者拿到的不是裸图，而是 `LeadAgentAssembly(graph, descriptor)`
-（agent.py:90）。`assemble_lead_agent`（agent.py:754）是 Gateway 用的富入口，
+（agent.py:94）。`assemble_lead_agent`（agent.py:838）是 Gateway 用的富入口，
 返回"编译好的图 + 图由什么装配而成"：模型（运行时覆盖后）、渲染提示词 hash、
 授权后留下的工具清单、按序的中间件栈——由
 `agents/assembly_descriptor.py::build_assembly_descriptor` 构建，扩展观察者
@@ -175,7 +197,7 @@ graph = create_agent(
 （`config.get("recursion_limit", "framework-default")`；web UI 与调度器默认
 1000，见 AGENTS.md）。
 
-`make_lead_agent`（agent.py:749）只是 `assemble_lead_agent(config).graph` 的薄
+`make_lead_agent`（agent.py:833）只是 `assemble_lead_agent(config).graph` 的薄
 包装——签名与"返回裸图"是**发布 ABI**：LangGraph Server 直接调用它，二者皆不可
 改。运行时拿图必须防御性解包（`unwrap_agent_graph`），因为第三方/测试工厂可能
 返回裸图（worker.py::_agent_graph 同款逻辑）。若图是 delta 模式编译的，裸图只读
@@ -184,7 +206,7 @@ graph = create_agent(
 ### 4.2.3 运行时的"节点/边"控制面
 
 图结构不可手改，但每次运行仍可控制图的走法——`run_agent()` 签名直接暴露
-LangGraph 的图级开关（worker.py:744）：
+LangGraph 的图级开关（worker.py:868）：
 
 ```python
 async def run_agent(bridge, run_manager, record, *, ctx, agent_factory, graph_input,
@@ -283,13 +305,13 @@ checkpointer + 模式绑在一起：给 config 注入模式标记、每次 get/u
 `InMemorySaver`/`PostgresSaver` 覆写）收集每个路径祖先的全部 `pending_writes`，
 但共享父节点还带着被弃用兄弟子节点写入的 writes——重放进 fork，run 就从一份仍
 含待替换答案的消息清单开始（#4458）。所以 worker 把 delta resume 线性化
-（`worker.py::_linearize_delta_checkpoint_resume`，2099 起）。错误回滚同样需要
+（`worker.py::_linearize_delta_checkpoint_resume`，2416 起）。错误回滚同样需要
 fork：`_capture_rollback_point`/`_rollback_to_pre_run_checkpoint`（2035/2188）。
 回滚点、fork、谱系走查的完整规则（`app/gateway/checkpoint_lineage.py`）以源码
 为准；一句话：**先走 `parent_config` 谱系，只有显式缺失才做有界的最新优先回退，
 环/悬空/深度耗尽一律 fail-closed**。
 
-同 thread 的写安全由 `worker.py::_checkpoint_thread_lock`（233 起，每线程一把
+同 thread 的写安全由 `worker.py::_checkpoint_thread_lock`（257 起，每线程一把
 异步锁）保证；gateway 手工 state 更新与摘要压缩复用
 `reserve_checkpoint_write()` 边界，与 run 准入共享"同一 thread 同时只有一个
 活跃写者"的持久化唯一约束（见 4.5.2）。
@@ -306,29 +328,29 @@ run 的 HTTP 面在 `app/gateway/routers/thread_runs.py`：`POST
 `GET /events` 等；`app/gateway/deps.py::langgraph_runtime()` 组装每请求依赖：
 StreamBridge + 持久化 + checkpointer + store + RunManager。嵌入式面
 `DeerFlowClient.stream()` 走同一条 `run_agent`（4.7）。无论哪条路，run 记录
-（`RunRecord`，runs/manager.py:156）与状态机都由 `RunManager` 持有，真正的图执行
+（`RunRecord`，runs/manager.py:185）与状态机都由 `RunManager` 持有，真正的图执行
 都由 `runtime/runs/worker.py::run_agent()` 承担。
 
 ### 4.5.2 RunManager：记账 / 准入 / 幂等 / 并发治理
 
-`runtime/runs/manager.py`（~2300 行，72 个成员）。按职责归类（一句职责 +
+`runtime/runs/manager.py`（2424 行，72 个成员）。按职责归类（一句职责 +
 精确路径）：
 
-- **记账**：`create`(:572) 建记录入 store；`persist_status`(:376)/
-  `set_status`(:917)/`update_run_completion`(:477) 推进状态机（queued →
-  launching → running → finalizing → completed/failed/cancelled/rolled_back，
+- **记账**：`create`(:605) 建记录入 store；`_persist_status`(:405)/
+  `set_status`(:991)/`update_run_completion`(:477) 推进状态机（pending →
+  running → success/error/timeout/interrupted，
   以 runs/schemas.py 的 `RunStatus` 为准）；`_persist_to_store` 带重试策略
   `PersistenceRetryPolicy`(:146)；
-- **准入**：`try_start`(:819) 拿 run 的启动权（pending → running）；
-  `create_or_reject`(:1424) 建记录时校验并发预算；
-  `reserve_thread_operation`(:1725) 是**线程级互斥准入**——同一 thread 的
+- **准入**：`try_start`(:893) 拿 run 的启动权（pending → running）；
+  `create_or_reject`(:1498) 建记录时校验并发预算；
+  `reserve_thread_operation`(:1803) 是**线程级互斥准入**——同一 thread 的
   新 run/手工 state 写/压缩共享"活跃写者唯一"的持久化约束，worker 内外的
-  竞争都由此裁决；`has_inflight`(:1869)/`has_later_run`(:1098) 做新旧次序判定；
-  撞上并发即 `ConflictError`(:2332)（HTTP 409，SDK 侧复用 thread 重试的标准信号）；
+  竞争都由此裁决；`has_inflight`(:1947)/`has_later_run`(:1098) 做新旧次序判定；
+  撞上并发即 `ConflictError`(:2419)（HTTP 409，SDK 侧复用 thread 重试的标准信号）；
 - **幂等**：run 幂等键 + `try_start` 的原子状态迁移保证重复投递只会有一个
   执行者；调度任务每次发生都带稳定幂等键（见根 AGENTS.md 的
   `uq_scheduled_task_run_active` 语义，runs/ 共享同一套簿记）；
-- **取消**：`cancel`(:1235) 三路并施——`_signal_local_cancel`（进程内
+- **取消**：`cancel`(:1309) 三路并施——`_signal_local_cancel`（进程内
   asyncio）/`_request_durable_cancel`（库内持久化取消标记）/`_request_remote_cancel`
   （跨实例），action 区分 `interrupt` 与 `rollback`；`set_status_if_not_cancelled`
   (:976) 保证被取消的 run 不再推进成功态；`CancelOutcome`(:2320) 枚举结果；
@@ -343,19 +365,19 @@ StreamBridge + 持久化 + checkpointer + store + RunManager。嵌入式面
 
 ### 4.5.3 run_agent：worker 主循环
 
-`runtime/runs/worker.py::run_agent`(:744，2900 行)——"Execute an agent in the
+`runtime/runs/worker.py::run_agent`(:868，3231 行)——"Execute an agent in the
 background, publishing events to bridge"。职责一句话版：
 
 - **preflight 与回滚点**：进 try 前捕获 `pre_run_checkpoint_id` 与 workspace
   快照（`_capture_rollback_point`），失败路径 `_rollback_to_pre_run_checkpoint`
   把线程态滚回 run 之前（fork 谱系），`checkpoint_rollback_completed` 防二次回滚；
-- **图与上下文**：`_agent_graph`(:645) 从工厂结果解包 LeadAgentAssembly；
-  `_install_runtime_context`(:604) 把 RunContext（checkpointer/store/event_store/
+- **图与上下文**：`_agent_graph`(:701) 从工厂结果解包 LeadAgentAssembly；
+  `_install_runtime_context`(:655) 把 RunContext（checkpointer/store/event_store/
   thread_store/租户身份/trace 等）注入 config；`_bind_trace_id`(:718) 打
   `X-Trace-Id`（trace 上下文在 worker 内部是唯一事实源）；
 - **流主循环**：graph `astream`，逐帧 `_unpack_stream_item`(:2724) →
   `_compose_sse_event`(:2757) 组事件名（子图加 `|<ns>` 命名空间）→
-  `_publish_stream_item`(:2871) 发布到 StreamBridge；`_lg_mode_to_sse_event`
+  `_publish_stream_item`(:3194) 发布到 StreamBridge；`_lg_mode_to_sse_event`
   (:2593) 把 LangGraph mode 映射为 SSE event 名；文件工具增量
   `_LargeFileToolChunkBatcher`(:402) 按有界批次合并 write_file/str_replace
   delta（多模式消费契约，AGENTS.md 有专段）；
@@ -388,12 +410,16 @@ run 生命周期（不准另起执行栈——AGENTS.md 红线）。
 `runtime/stream_modes.py` 是流模式的统一入口：
 
 ```python
-SUPPORTED_STREAM_MODES = ("values", "messages-tuple", "custom", ...)  # 8 行附近
-def normalize_stream_modes(raw) -> list[str]:      # None → ["values"]
+type RunStreamMode = Literal[                       # stream_modes.py:7
+    "values", "messages-tuple", "updates", "debug",
+    "tasks", "checkpoints", "custom",
+]
+SUPPORTED_RUN_STREAM_MODES: frozenset[str] = frozenset(get_args(RunStreamMode.__value__))  # :17
+def normalize_stream_modes(raw) -> list[str]:      # None → ["values"]，非法模式抛 UnsupportedStreamModeError
 def to_langgraph_stream_modes(raw) -> list[str]:   # "messages-tuple" → "messages"
 ```
 
-对外契约用 **`messages-tuple`**（带 message 元组的增量），对 LangGraph 引擎翻译成
+注：公开可用的 run 流模式即上面的 7 种（`SUPPORTED_RUN_STREAM_MODES`，由 `RunStreamMode` Literal 派生，非固定元组）。对外契约用 **`messages-tuple`**（带 message 元组的增量），对 LangGraph 引擎翻译成
 **`messages`**——这个改写是 DeerFlow 的流协议边界。三种核心模式的语义：
 
 | 模式 | 帧内容 | 用途 |

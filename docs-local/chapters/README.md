@@ -1,10 +1,10 @@
 # DeerFlow 深度说明书(基于最新代码)
 
-> **基于 DeerFlow 最新源码编写**:本仓库 commit `2672e209`(2026-09,上游 main ~2.1.0)
+> **基于 DeerFlow 最新源码编写**:本仓库 commit `11b339d6`(2026-10-01,上游 main ~2.2.0-dev)
 >
 > 本书融合两本社区旧书的结构与素材——[hawkli-1994/deerflow-book](https://github.com/hawkli-1994/deerflow-book) 与 [coolclaws/deerflow-book](https://github.com/coolclaws/deerflow-book)——
 > 但全部内容已按当前代码逐章校准:旧版目录(`backend/src/`、11 层中间件、`skill.yaml`、旧配置字段)一律作废,
-> 以 `backend/packages/harness/`、35 链位中间件、`SKILL.md`、双层配置等新结构为准。
+> 以 `backend/packages/harness/`、39 链位中间件、`SKILL.md`、双层配置等新结构为准。
 >
 > 配套深文:`../middleware/middleware-01-io-safety.md` ~ `middleware-08-safety-guards.md`
 > (8 篇逐中间件深度文档,本书第 6、7 章与其互为表里)。
@@ -25,7 +25,7 @@
 |----|------|-----------|
 | 4 | [04-langgraph-engine.md](04-langgraph-engine.md) | LangGraph 引擎:ThreadState、图、checkpointer、run 生命周期、流式 |
 | 5 | [05-lead-agent.md](05-lead-agent.md) | Lead Agent 装配:ABI 入口、prompt 静态化、运行时 configurable |
-| 6 | [06-middleware-pipeline.md](06-middleware-pipeline.md) | 中间件总纲:钩子机制、三段装配、35 链位职责地图 |
+| 6 | [06-middleware-pipeline.md](06-middleware-pipeline.md) | 中间件总纲:钩子机制、三段装配、39 链位职责地图 |
 | 7 | [07-context-engineering.md](07-context-engineering.md) | 上下文工程:前缀缓存、三层内存治理、主线保持、信任分层 |
 
 ### 第三部分 · 子代理与记忆
@@ -52,7 +52,7 @@
 |----|------|-----------|
 | 16 | [16-models.md](16-models.md) | 模型配置与适配:工厂、能力矩阵、provider 补丁 |
 | 17 | [17-gateway.md](17-gateway.md) | Gateway API 与 IM 渠道:REST、SSE、trace、鉴权 |
-| 18 | [18-config-extensions.md](18-config-extensions.md) | 配置体系与扩展:双层配置、热重载边界、五类扩展点 |
+| 18 | [18-config-extensions.md](18-config-extensions.md) | 配置体系与扩展:双层配置、热重载边界、八类扩展点 |
 
 ### 附录
 

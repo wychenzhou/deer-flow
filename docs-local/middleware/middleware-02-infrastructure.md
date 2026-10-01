@@ -1,4 +1,4 @@
-# 基础设施层中间件：线程目录 · 上传上下文 · 沙箱生命周期（链位 4、5、6）
+# 基础设施层中间件：线程目录 · 上传上下文 · 沙箱生命周期（链位 5、6、7）
 
 > 这三个中间件不做拦截/改写，而是在 **agent 思考之前把运行环境准备好**——为 `(user, thread)` 建私有目录、把刚上传的文件变成模型可读的上下文、保证背后有一个身份对整条图可见的活沙箱。
 > 源码相对路径：`backend/packages/harness/deerflow/`（`agents/middlewares/*`、`sandbox/middleware.py`）；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 [目录索引](README.md)。
@@ -7,9 +7,9 @@
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 默认行为 | 它防住的坑 |
 |---|---|---|---|---|---|
-| 4 | `ThreadDataMiddleware` | 为 `(user, thread)` 解析/创建目录并把路径写进 state | `before_agent` | `lazy_init=True` 只算路径 | 多用户/线程文件串台、容器 UID 权限、目录穿越 |
-| 5 | `UploadsMiddleware`（lead only） | 把**当前这轮**新上传文件以 `<current_uploads>` 块注入最新 HumanMessage | `before_agent` | 每节最多列 10 个 | 上传污染记忆、注入面、上下文膨胀 |
-| 6 | `SandboxMiddleware` | 沙箱获取/保留/释放，并把懒初始化产生的 `sandbox_id` 发布进 state | `before_agent`/`after_agent`/`wrap_tool_call` | `lazy_init=True` 首用才获取 | 懒状态下游不可见、重复释放/跨 owner、provider 并发撕裂 |
+| 5 | `ThreadDataMiddleware` | 为 `(user, thread)` 解析/创建目录并把路径写进 state | `before_agent` | `lazy_init=True` 只算路径 | 多用户/线程文件串台、容器 UID 权限、目录穿越 |
+| 6 | `UploadsMiddleware`（lead only） | 把**当前这轮**新上传文件以 `<current_uploads>` 块注入最新 HumanMessage | `before_agent` | 每节最多列 10 个 | 上传污染记忆、注入面、上下文膨胀 |
+| 7 | `SandboxMiddleware` | 沙箱获取/保留/释放，并把懒初始化产生的 `sandbox_id` 发布进 state | `before_agent`/`after_agent`/`wrap_tool_call` | `lazy_init=True` 首用才获取 | 懒状态下游不可见、重复释放/跨 owner、provider 并发撕裂 |
 
 三者共享两块地基：`Paths`（`config/paths.py`）与 `resolve_runtime_user_id()`（`runtime/user_context.py`），见本篇 §0。
 
@@ -55,9 +55,9 @@ resolve_runtime_user_id(runtime):
 **坑四：每次执行都同步文件 IO 拖慢纯对话。** 很多 run 根本不落盘（直接回答就结束）。默认 `lazy_init=True` 让 `before_agent` **只计算路径字符串，不建目录**，mkdir 推迟给真正消费方（沙箱获取、上传落盘、工具首写）；`lazy_init=False`（eager）才同步建目录——用于必须立即 bind mount 的场景。
 ### 1.2 钩子与执行时机（链位置）
 
-`before_agent`——只在 agent 节点开始、**模型调用之前**执行一次。链位是共享运行时基座第 4 位
+`before_agent`——只在 agent 节点开始、**模型调用之前**执行一次。链位是共享运行时基座第 5 位
 （`tool_error_handling_middleware.py::_build_runtime_middlewares` 的 Layer 2 `thread_hooks` 第一项），
-在 InputSanitization(1)/ToolOutputBudget(2)/ToolResultSanitization(3) 之后、Uploads(5) 与 Sandbox(6)
+在 Layer‑1 外包裹层 InputSanitization(1)…PiiRedaction(4) 之后、Uploads(6) 与 Sandbox(7)
 之前。**顺序即正确性**：目录必须先于沙箱获取（bind-mount provider 要求宿主目录已存在），路径必须先于
 一切读它的下游（subagent 任务、`.tool-results` 外置）。
 ### 1.3 内部实现逻辑
@@ -101,7 +101,7 @@ legacy 布局 `{base}/threads/{thread_id}/...` 仅出现在显式传 `user_id=No
 走 users 布局——向后兼容由 `Paths.thread_dir` 内部消化。
 ### 1.5 与邻居的关系
 
-Uploads(5)/Sandbox(6) 复用同一个 `resolve_runtime_user_id` + `Paths` 组合，算出的上传目录、bind-mount
+Uploads(6)/Sandbox(7) 复用同一个 `resolve_runtime_user_id` + `Paths` 组合，算出的上传目录、bind-mount
 源与 `thread_data` 严格一致；ThreadData 先跑等于先把「棋盘坐标」定下来。`thread_data` 是跨中间件公共
 状态：Sandbox 的路径映射、ToolOutputBudget 的 `.tool-results` 外置、subagent 委派、制品收集都读它。
 ### 1.6 源码阅读指引
@@ -113,7 +113,7 @@ Uploads(5)/Sandbox(6) 复用同一个 `resolve_runtime_user_id` + `Paths` 组合
 ---
 ## 2. UploadsMiddleware：只把「这一轮」的上传交给模型
 
-**源码**：`agents/middlewares/uploads_middleware.py`（约 310 行）。**lead agent only**——链上第 5 位由
+**源码**：`agents/middlewares/uploads_middleware.py`（约 310 行）。**lead agent only**——链上第 6 位由
 `include_uploads` 门控，subagent 装配时传 `include_uploads=False`。
 ### 2.1 它解决什么问题
 
@@ -132,7 +132,7 @@ Uploads(5)/Sandbox(6) 复用同一个 `resolve_runtime_user_id` + `Paths` 组合
 跳过并记日志）。
 ### 2.2 钩子与执行时机（链位置）
 
-`before_agent`（同步）与 `abefore_agent`（异步图路径）。链位 5，紧跟 ThreadData(4)：此时目录坐标已定、
+`before_agent`（同步）与 `abefore_agent`（异步图路径）。链位 6，紧跟 ThreadData(5)：此时目录坐标已定、
 消息已被 InputSanitization(1) 消毒（`original_user_content` 已备份）、ThreadData 已打溯源 stamp——
 本中间件在这条消息上**前置拼接** `<current_uploads>` 块，模型随后就看到。
 
@@ -184,13 +184,13 @@ return {"uploaded_files": new_files, "messages": messages}
   也因存在性/当前消息检查自然失效。省略文件的类型直方图本身也再过一次 `neutralize_untrusted_tags`。
 ### 2.4 与邻居的关系
 
-- **依赖 ThreadData(4) 地基**：存在性检查的 `uploads_dir` 由 `Paths.sandbox_uploads_dir` +
+- **依赖 ThreadData(5) 地基**：存在性检查的 `uploads_dir` 由 `Paths.sandbox_uploads_dir` +
   `resolve_runtime_user_id` 算出——同源同桶，绝不会检查别人的目录。
 - **依赖 InputSanitization(1) 产物**：正文读取优先 `original_user_content`（消毒前备份），因为
   sanitize 可能改写文件名/路径字符，读当前 content 会拿到被改写的版本。
 - **lead-only 原因**：上传是对 **lead 对话**的输入。subagent 也注入会把同一批文件灌进每个子代理上下文
   （token 浪费 + 归属混乱）；subagent 只需经 `task` 拿到委派文本，需要文件时共享 lead 沙箱自己读。
-- **与 Sandbox(6) 不互相依赖**，但顺序保证注入发生在沙箱获取前，模型「看到文件」与「拿到能读文件的
+- **与 Sandbox(7) 不互相依赖**，但顺序保证注入发生在沙箱获取前，模型「看到文件」与「拿到能读文件的
   沙箱」不跨轮。
 ### 2.5 源码阅读指引
 
@@ -238,8 +238,8 @@ policy-scoped run（有 projection）在 `before_agent` **强制抢先获取**�
 ### 3.2 钩子与执行时机（链位置 + 生命周期状态机）
 
 钩子全集：`before_agent`/`abefore_agent`（获取/保留）、`after_agent`/`aafter_agent`（释放）、
-`wrap_tool_call`/`awrap_tool_call`（diff 发布）。链位 6 = Layer 2 `thread_hooks` 最后一项，排在
-ThreadData(4)/Uploads(5) 之后：eager 获取要求线程目录已存在（bind mount），且获取发生在模型/tool
+`wrap_tool_call`/`awrap_tool_call`（diff 发布）。链位 7 = Layer 2 `thread_hooks` 最后一项，排在
+ThreadData(5)/Uploads(6) 之后：eager 获取要求线程目录已存在（bind mount），且获取发生在模型/tool
 执行之前。**after 钩子按注册序反序执行**——整链收尾时 Sandbox 第一个释放，先停执行资源、再让上层
 中间件处理后事。
 
@@ -386,11 +386,11 @@ def merge_sandbox(existing, new):
 返回 None）——回放状态不允许被本 run 当成自己的资源绑定。
 ### 3.5 与邻居的关系（ThreadData → Uploads → Sandbox 为什么是这个顺序）
 
-1. **ThreadData(4) 先建坐标系**：`thread_data` 路径是 provider bind-mount 的宿主源，eager 下目录必须
+1. **ThreadData(5) 先建坐标系**：`thread_data` 路径是 provider bind-mount 的宿主源，eager 下目录必须
    先于沙箱存在；它是全链的「棋盘」。
-2. **Uploads(5) 先铺上下文**：让模型在同一次调用里既看到 `<current_uploads>` 又拿到能读这些文件的
+2. **Uploads(6) 先铺上下文**：让模型在同一次调用里既看到 `<current_uploads>` 又拿到能读这些文件的
    沙箱，认知不跨轮。
-3. **Sandbox(6) 殿后**：它是执行资源，只在消息/目录就绪后才有意义；after 钩子逆序最先释放，保证整个
+3. **Sandbox(7) 殿后**：它是执行资源，只在消息/目录就绪后才有意义；after 钩子逆序最先释放，保证整个
    run 生命周期内沙箱可用。
 4. **owner 差异**：lead 拥有线程物理 skill 投影（`owns_agent_skill_projection=True`）并可 eager 获取；
    delegated subagent / prompt-only bootstrap agent 是 **non-owner**——`False` 让它们绝不重建共享
@@ -415,15 +415,15 @@ fork_restored)`、authorize 单次决策）；`agents/thread_state.py::merge_san
 ```
 run 开始
   ├─ InputSanitization(1)… 净化消息、备份 original_user_content
-  ├─ ThreadData(4).before_agent   thread_id 校验 → 身份解析 → thread_data 路径 → 消息溯源 stamp
-  ├─ Uploads(5).before_agent      files 过滤 → <current_uploads> 前置拼接 → uploaded_files 状态
-  ├─ Sandbox(6).before_agent      lazy+共享视图 → 零操作（不建 owner、不碰 provider）
+  ├─ ThreadData(5).before_agent   thread_id 校验 → 身份解析 → thread_data 路径 → 消息溯源 stamp
+  ├─ Uploads(6).before_agent      files 过滤 → <current_uploads> 前置拼接 → uploaded_files 状态
+  ├─ Sandbox(7).before_agent      lazy+共享视图 → 零操作（不建 owner、不碰 provider）
   ├─ 模型调用 → 决定调工具
   │    └─ 首个沙箱工具: ensure_sandbox_initialized → authorize → acquire
   │         → runtime.state["sandbox"]=id（本地）
   │         → wrap_tool_call 前后 diff → Command(update) 发布 ◄─ 关键一步
   ├─ 下游工具/中间件（ToolOutputBudget 外置、task 委派共享等）读到 sandbox_id
-  └─ after_agent(逆序): Sandbox(6) 释放（fork_restored 跳过；owner lease 记账）
+  └─ after_agent(逆序): Sandbox(7) 释放（fork_restored 跳过；owner lease 记账）
 ```
 
 **关键设计决策**：

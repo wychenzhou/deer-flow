@@ -1,19 +1,20 @@
-# 06 · 中间件管道总纲:35 链位地图与装配机制
+# 06 · 中间件管道总纲:39 链位地图与装配机制
 
-> 基于 DeerFlow 最新源码(本仓库 commit 2672e209,2026-09)编写
+> 基于 DeerFlow 最新源码(本仓库 commit 11b339d6,2026-10-01)编写
 > 配套深文:`../middleware/middleware-01-io-safety.md` ~ `middleware-08-safety-guards.md`(8 篇,逐中间件展开)
 
 本章是「中间件」主题的**总纲章**:只回答三件事——中间件机制是什么(§1)、
-35 个链位怎么装出来的(§2)、以及一张可直接查的**职责地图**(§4)。至于每个
+39 个链位怎么装出来的(§2)、以及一张可直接查的**职责地图**(§4)。至于每个
 中间件内部的伪代码、状态机、决策细节,**一律交给 8 篇深文**,本章不重复深挖;
 §3 给出"如何按需读那 8 篇"的路线。
 
 先给结论,一句话版本:
 
-> 一个"DeerFlow 模型调用"是**一次洋葱式嵌套**:35 个链位(语义槽位)分成
-> 共享基座(1–13)+ lead-only 追加段(14–35)两段装配,可选位按配置决定装不装,
-> 扩展在最后一步并入并经受顺序不变量校验。链位号是**语义契约**,物理装配序
-> 与它的唯一偏差是 #13 的"夹心"结构——见 §2.3。
+> 一个"DeerFlow 模型调用"是**一次洋葱式嵌套**:39 个链位(语义槽位)分成
+> 共享基座(1–16)+ lead-only 追加段(17–39)两段装配,可选位按配置决定装不装,
+> 扩展在最后一步并入并经受顺序不变量校验,装配完成后还有一道
+> `tool_declarations` 声明工具收窄/复核。链位号是**语义契约**,物理装配序与它
+> 存在几处有意偏差(夹心槽、职能分组编号、不占位旁挂项)——见 §2.3。
 
 ---
 
@@ -91,12 +92,12 @@ wrap_model_call**(ToolReceipt 就是这样:结果侧打戳 + 模型侧渲染隐�
 连边**:最后注册的中间件最先看到模型输出,其 state 更新先落地,前面的中间件
 看到的是"已被它改写过的 state"。
 
-这是全书最容易踩的暗坑,也是收尾段(32–35)设计的全部依据。真实例子:lead 链
-注册顺序是 TerminalResponse(32)→ModelLength(33)→Safety(34)→Clarification(35),
+这是全书最容易踩的暗坑,也是收尾段(36–39)设计的全部依据。真实例子:lead 链
+注册顺序是 TerminalResponse(36)→ModelLength(37)→Safety(38)→Clarification(39),
 而**实际动作顺序恰好反过来**:Clarification 最先看到原始输出(剥掉与
 ask_clarification 同批的 sibling),接着 Safety 检测 `content_filter` 之类的
 安全终止并剥掉 tool_calls,**然后** LoopDetection/TokenBudget 才在"干净消息"上
-记账,TerminalResponse 最后兜底判空。若把 Safety 注册到 27 之前,它看到的将是
+记账,TerminalResponse 最后兜底判空。若把 Safety 注册到 31 之前,它看到的将是
 尚未被剥 tool_calls 的失控响应——顺序就是正确性(§1.5)。
 
 ### 1.4 before_agent:每 run 一次,只做"初始化即应持久"的事
@@ -111,10 +112,10 @@ Memory 把整轮消息排队给异步提取。
 
 1. **改写先于读取**:ToolResultSanitization(3)必须坐在 ToolOutputBudget(2)
    **内层**——先中和原始输出,再由预算截断;"先净化后预算"而不是反过来。
-2. **发布先于消费**:SkillActivation(15)必须紧贴 SkillToolPolicy(16)之前——
-   15 在 wrap 里把 slash 激活源写进 run context,16 同一轮立刻读它决定工具裁剪;
-   DurableContext(17)必须在 Summarization(18)之前——"委派账本在压缩前捕获";
-   McpRouting(24)必须在 DeferredToolFilter(25)之前,代码里还有一条装配期断言
+2. **发布先于消费**:SkillActivation(18)必须紧贴 SkillToolPolicy(19)之前——
+   18 在 wrap 里把 slash 激活源写进 run context,19 同一轮立刻读它决定工具裁剪;
+   DurableContext(20)必须在 Summarization(21)之前——"委派账本在压缩前捕获";
+   McpRouting(27)必须在 DeferredToolFilter(29)之前,代码里还有一条装配期断言
    `assert_mcp_routing_before_deferred_filter` 直接拦错。
 3. **数据依赖由程序校验**:`deerflow/extensions/ordering.py` 把关键不变量声明为
    数据(ToolReceipt 必须在 Guardrail/SandboxAudit/ReadBeforeWrite/ToolProgress
@@ -136,18 +137,19 @@ SkillActivation。工具结果改写链另有
 
 ---
 
-## 2. 三段装配:链是怎么"装"出来的
+## 2. 分段装配:链是怎么"装"出来的
 
-35 个链位不是一张平铺的配置表,而是**三个函数、按严格顺序、跨两个文件**拼出来
-的。装配代码只有三处,背下来就掌握了整个管道:
+39 个链位不是一张平铺的配置表,而是**按严格顺序、跨多个文件**拼出来的。装配
+代码集中在四处,外加一道装配后的声明工具收窄,背下来就掌握了整个管道:
 
 | 段 | 函数 | 文件位置 | 产出 |
 |---|---|---|---|
-| ① 共享基座 | `_build_runtime_middlewares` | `agents/middlewares/tool_error_handling_middleware.py`(L161) | 链位 1–13 的实例列表 |
-| ①′ lead 入口 | `build_lead_runtime_middlewares` | 同文件(L318) | 基座 + lead 参数(含 Uploads、receipt 渲染模式) |
-| ①″ subagent 入口 | `build_subagent_runtime_middlewares` | 同文件(L343) | 基座变体 + subagent 追加段 |
-| ② lead-only 追加 | `build_middlewares` | `agents/lead_agent/agent.py`(L457) | 在基座上继续 append 链位 14–35 |
+| ① 共享基座 | `_build_runtime_middlewares` | `agents/middlewares/tool_error_handling_middleware.py`(L346) | 链位 1–16 的实例列表 |
+| ①′ lead 入口 | `build_lead_runtime_middlewares` | 同文件(L537) | 基座 + lead 参数(含 Uploads、receipt 渲染模式) |
+| ①″ subagent 入口 | `build_subagent_runtime_middlewares` | 同文件(L566) | 基座变体 + subagent 追加段 |
+| ② lead-only 追加 | `build_middlewares` | `agents/lead_agent/agent.py`(L482) | 在基座上继续 append 链位 17–39 |
 | ③ 扩展并入 + 校验 | `compose_with_extensions` | `extensions/stack.py` | 按 Placement 锚点插入扩展贡献,`assert_ordering` 终检 |
+| ④ 声明工具收窄/复核 | `narrow_declared_tools` / `verify_declared_tool_view` | `agents/middlewares/tool_declarations.py` | 授权开启时,把中间件 `tools` 声明按 Layer 1 裁决收窄,并在最终绑定前复核 |
 
 ### 2.1 ① 共享基座:三个内部清单
 
@@ -155,53 +157,70 @@ SkillActivation。工具结果改写链另有
 (`middlewares = [*outer_wrappers, *thread_hooks, *tail]`):
 
 ```python
-outer_wrappers:  # 链位 1-3 —— 最外层 wrap_model_call(净化/预算/中和)
+outer_wrappers:  # Layer 1 —— 最外层 wrap_model_call(净化/预算/中和/脱敏)
     InputSanitizationMiddleware()          # 1 必须先装配 = 最外
-    ToolOutputBudgetMiddleware             # 2
+    KnowledgeScopeMiddleware()             # (不占位)紧随 1:抹除范围/展示数据、禁用时拦 knowledge_search
+    ToolOutputBudgetMiddleware(...)        # 2 外化 + 模型侧兜底截断/消除被取代的 write_file 正文
     ToolResultSanitizationMiddleware()     # 3 坐在 2 内层:先中和后截断
-thread_hooks:    # 链位 4-6 —— before_agent 一次性钩子(线程数据)
-    ThreadDataMiddleware(lazy_init=...)    # 4
-    UploadsMiddleware()                    # 5 仅 include_uploads=True(lead)
-    SandboxMiddleware(...)                 # 6
-tail:            # 链位 7-13 —— 后处理/工具边界层(append 序 = 物理序!)
-    DanglingToolCallMiddleware()           # 7  (include_dangling_tool_call_patch)
-    LLMErrorHandlingMiddleware(...)        # 8
-    ToolReceiptMiddleware(...)             # 13·外 ← 物理上紧跟 8 之后!
-    GuardrailMiddleware(authz 适配)        # 9·外 (authorization.enabled)
-    GuardrailMiddleware(显式 provider)     # 9·内 (guardrails.enabled)
-    SandboxAuditMiddleware()               # 10
-    ReadBeforeWriteMiddleware()            # 11 (read_before_write.enabled)
-    ToolProgressMiddleware(...)            # 12 (tool_progress.enabled)
-    ToolErrorHandlingMiddleware(...)       # 13·内 ← 最内层,执行+抓异常
+    PiiRedactionMiddleware(...)            # 4 仅 pii_redaction.enabled;列最后 = 最内 L1
+thread_hooks:    # Layer 2 —— before_agent 一次性钩子(线程数据)
+    ThreadDataMiddleware(lazy_init=...)    # 5
+    UploadsMiddleware()                    # 6 仅 include_uploads=True(lead)
+    SandboxMiddleware(...)                 # 7
+tail:            # Layer 3 —— 后处理/工具边界层(append 序 = 物理序!)
+    DanglingToolCallMiddleware()           # 8  (include_dangling_tool_call_patch)
+    LLMErrorHandlingMiddleware(...)        # 9
+    ToolReceiptMiddleware(...)             # 15·外 ← 物理上紧跟 9 之后!(receipts_enabled)
+    ArtifactResolutionMiddleware(...)      # 10 (tool_artifacts.enabled 且 resolve_handles_in_args)
+    GuardrailMiddleware(authz 适配)        # 11·外 (authorization.enabled)
+    GuardrailMiddleware(显式 provider)     # 11·内 (guardrails.enabled)
+    SandboxAuditMiddleware()               # 12
+    ReadBeforeWriteMiddleware()            # 13 (read_before_write.enabled)
+    ToolProgressMiddleware(...)            # 14 (tool_progress.enabled)
+    ToolErrorHandlingMiddleware(...)       # 15·内 ← 最内层,执行+抓异常
+    ArtifactCaptureMiddleware(...)         # 16 (tool_artifacts.enabled)
 ```
 
 ### 2.2 ② lead-only 追加段
 
 `build_middlewares` 拿到基座后按固定顺序继续 `append`(代码里每段都有注释解释
-"为什么必须在谁之后")。顺序即:**14–17 上下文四件套 → 18 压缩 → 19 待办 →
-20 用量 → 21 标题 → 22 记忆 → 23 视觉 → 24/25 MCP 路由与过滤 → 26 系统消息合并
-→ 27 子代理限额 → 28 循环检测 → 29 预算硬停 → 30 自定义 → 31 配置扩展 →
-32–35 收尾四件套**。文件头还有一段"顺序注释"总结了硬约束:
+"为什么必须在谁之后")。语义链号顺序即:**17–20 上下文四件套(DynamicContext →
+SkillActivation → SkillToolPolicy → DurableContext)→ 21 压缩 → 22 待办 → 23 用量
+→ 24 标题 → 25 记忆 → 26 视觉 → 27/29 MCP 路由与过滤 → 28 提升审计(物理上更靠前,
+见 §2.3)→ 30 系统消息合并 → 31 子代理限额 → 32 循环检测 → 33 预算硬停 → 34 自定义
+→ 35 配置扩展 → 36–39 收尾四件套**。文件头还有一段"顺序注释"总结了硬约束:
 ThreadData 在 Sandbox 之前(先有 thread_id)、Summarization 要早(先减上下
 文)、Title/Memory/ViewImage/Clarification 的相对位置理由。
 
-### 2.3 链位号 vs 物理序:全书唯一需要记住的偏差
+### 2.3 链位号 vs 物理序:需要记住的几处偏差
 
-对比 §2.1 的两个注释与速查表编号,你会看到**链位号 ≠ 物理 append 序号**:
+对比 §2.1 的注释与速查表编号,你会看到**链位号 ≠ 物理 append 序号**。这是
+有意设计(语义槽位服务阅读与契约,物理序服务洋葱嵌套的正确性),共三类:
 
-- **#9 是一个语义槽,物理上是 0~2 个 GuardrailMiddleware 实例**(authorization
-  适配器 + 显式 guardrail provider,授权永远在显式 guardrail 外层先判);
-- **#13 是一个"夹心槽"**:语义上把"工具账本"的两端合成一位——**最外层**的
-  ToolReceipt(物理紧跟 #8,因为任何会短路/重建结果的门卫都必须被它包住,否则
-  账本静默缺口)与**最内层**的 ToolErrorHandling(物理队尾,负责真正执行工具并
-  把异常变成 error ToolMessage)。中间夹着的 #9/#10/#11/#12 全是"可以不执行
-  工具就返回结果"的短路者。
+- **不占位旁挂项**:`KnowledgeScopeMiddleware` 不占独立链号,紧跟在 #1
+  InputSanitization 之后装配——它只投影 Gateway 准入的执行范围、抹除消息里的
+  范围/展示数据,并在 scope 被禁用时拦 `knowledge_search`,属于 Layer 1 的同一
+  道最外包装,拆成独立链号会让"最外=净化"这条纪律失去焦点。
+- **成对/夹心槽**:**#11** 是一个语义槽,物理上是 0~2 个 GuardrailMiddleware
+  实例(authorization 适配器 + 显式 guardrail provider,授权永远在显式
+  guardrail 外层先判);**#15** 是一个"夹心槽",语义上把"工具账本"的两端合成
+  一位——**最外层**的 ToolReceipt(物理紧跟 #9,因为任何会短路/重建结果的门卫
+  都必须被它包住,否则账本静默缺口)与**最内层**的 ToolErrorHandling(物理队尾,
+  负责真正执行工具并把异常变成 error ToolMessage)。两者之间夹着的
+  #10/#11/#12/#13/#14 全是"可以不执行工具就返回结果"的短路者(ArtifactResolution
+  的未知句柄、Guardrail 拒绝、SandboxAudit 重建、ReadBeforeWrite 拦写、
+  ToolProgress 停滞)。
+- **职能分组编号**:**#28** `DeferredToolPromotionAuditMiddleware` 在物理装配上
+  位置更靠前——它紧随 #18 SkillActivation、**在 #19 SkillToolPolicy 之前**装配
+  (tool wrapper 先入列=最外层,所以它必须注册在 SkillToolPolicy 之前,才能看到
+  被策略过滤后的最终 `tool_search` Command)。但文档口径里它按延迟工具族统一编号
+  (27 McpRouting / 28 提升审计 / 29 DeferredToolFilter),与 8 篇深文共用一套号。
 
-这就是"35 链位"的正确读法:**35 是文档化的语义槽位上限,不是实例数**。#9
-(0–2 个 Guardrail 实例)与 #13(2 个中间件的夹心)在计数时对折为一位,加上
-可选位按开关装配、30/31 是 0..N 的插入点——真实实例数随配置在约 25(全关 +
-零插入)到 35+(全开 + 插入)之间浮动。链位号是**全书统一口径**(AGENTS.md 与
-8 篇深文共用),物理位置以代码为准。
+这就是"39 链位"的正确读法:**39 是文档化的语义槽位上限,不是实例数**。#11
+(0–2 个 Guardrail 实例)、#15(2 个中间件的夹心)在计数时对折为一位,加上
+KnowledgeScope 不占位、可选位按开关装配、34/35 是 0..N 的插入点——真实实例数
+随配置在约 29(全关 + 零插入)到 40+(全开 + 插入)之间浮动。链位号是**全书统一
+口径**(AGENTS.md 与 8 篇深文共用),物理位置以代码为准。
 
 ### 2.4 ③ 扩展并入:为什么必须在最外层 builder 的末尾
 
@@ -217,7 +236,7 @@ ThreadData 在 Sandbox 之前(先有 thread_id)、Summarization 要早(先减上
 | `STANDARD` | LLMErrorHandling 外层 + 最内 | 通用默认 |
 
 代码注释点明设计:**扩展注入只能在最终列表组装完成后执行一次**——若在基座
-builder 里做,MODEL_PHYSICAL 贡献会落在 lead-only 的 ~18 个中间件**之上**,
+builder 里做,MODEL_PHYSICAL 贡献会落在 lead-only 的 ~23 个中间件**之上**,
 改变观察者对"最终请求"的定义。并入后 `assert_ordering` 立即跑不变量校验
 (§1.5-3),扩展贡献想悄悄反转某个不变量会在装配期失败并**点名该扩展**。
 
@@ -229,14 +248,15 @@ builder 里做,MODEL_PHYSICAL 贡献会落在 lead-only 的 ~18 个中间件**�
 - 基座参数:`include_uploads=False`(子代理不注入上传)、
   `receipts_render_mode="always"`(引用在子代理语境产生——不渲染账本就无引用)、
   `owns_agent_skill_projection=False`(子代理不重建线程级 skill 投影);
-- 追加段换血:不装 DynamicContext(14)而装轻量 `SubagentDateContextMiddleware`
+- 追加段换血:不装 DynamicContext(17)而装轻量 `SubagentDateContextMiddleware`
   (只注入日期,无记忆查找/ID-swap——子代理一次性图不需要 lead 那套生命周期);
-  SkillActivation(15)/SkillToolPolicy(16)同 pair 复用(白名单限 discovery);
-  DurableContext(17)+ Summarization(18,`skip_memory_flush=True`,否则子代理
-  内部轮次会写进**父线程**记忆);ViewImage/McpRouting/DeferredToolFilter 按
-  同样条件装配;LoopDetection(28)/TokenBudget(29,默认开,`subagents.token_budget`)
+  SkillActivation(18)/SkillToolPolicy(19)同 pair 复用(白名单限 discovery),
+  中间同样插入 #28 提升审计;DurableContext(20)+ Summarization(21,
+  `skip_memory_flush=True`,否则子代理内部轮次会写进**父线程**记忆);
+  ViewImage/McpRouting/DeferredToolFilter 按
+  同样条件装配;LoopDetection(32)/TokenBudget(33,默认开,`subagents.token_budget`)
   镜像 lead(子代理无 task 工具,只有工具循环启发式可能触发);
-  Safety(34)照装;最后同样是 configured-extensions + compose_with_extensions
+  Safety(38)照装;最后同样是 configured-extensions + compose_with_extensions
   (AgentScope.SUBAGENT 锚点,MODEL_PHYSICAL 锚在 Coalescing 之后)。
 
 > 一句总结:中间件系统的"三段式"——**同一基座 + 按 scope 换追加段 + 扩展末段
@@ -252,80 +272,87 @@ builder 里做,MODEL_PHYSICAL 贡献会落在 lead-only 的 ~18 个中间件**�
 
 | 深文 | 覆盖链位 | 职责带 | 什么时候该读 |
 |---|---|---|---|
-| `middleware-01-io-safety.md` | 1、2、3(+ 7) | I/O 通道防线:进模型的、出模型的字节 | 关心注入/伪造/超大输出/悬挂调用 |
-| `middleware-02-infrastructure.md` | 4、5、6 | 线程目录、上传上下文、沙箱生命周期 | 想懂"文件落在哪、沙箱何时生何时灭" |
-| `middleware-03-error-handling.md` | 8、9、10、13 | 错误归一、授权/护栏门、沙箱审计、工具账本 | 关心"工具调用为什么没执行/失败了还可见" |
-| `middleware-04-file-safety.md` | 11、12 | 读改写门 + 停滞状态机 | 关心文件写安全与"工具空转" |
-| `middleware-05-context-injection.md` | 14、15、16、17 | 注入即改写:日期/技能/持久上下文 | 关心"模型凭什么知道今天几号、会用什么技能" |
-| `middleware-06-conversation-management.md` | 18、19、20、21、22 | 对话生命周期:压缩/待办/用量/标题/记忆 | 关心上下文变短、标题、记忆入库 |
-| `middleware-07-vision-routing.md` | 23、24、25、26 | 视觉注入、MCP 延迟工具路由与过滤、系统消息合并 | 关心图片、tool_search 机制 |
-| `middleware-08-safety-guards.md` | 27、28、29、30、31、32、33、34、35 | 终止性与收尾:限额/循环/预算/空回复/澄清 | 关心 run 为什么停、怎么停、扩展插哪 |
+| `middleware-01-io-safety.md` | 1、2、3、4、8(+ 1 之后不占位的 KnowledgeScope) | I/O 通道防线:进模型的、出模型的字节 | 关心注入/伪造/超大输出/悬挂调用/PII |
+| `middleware-02-infrastructure.md` | 5、6、7 | 线程目录、上传上下文、沙箱生命周期 | 想懂"文件落在哪、沙箱何时生何时灭" |
+| `middleware-03-error-handling.md` | 9、10、11、12、15、16 | 错误归一、授权/护栏门、沙箱审计、工具账本、artifact 解析/捕获 | 关心"工具调用为什么没执行/失败了还可见" |
+| `middleware-04-file-safety.md` | 13、14 | 读改写门 + 停滞状态机 | 关心文件写安全与"工具空转" |
+| `middleware-05-context-injection.md` | 17、18、19、20 | 注入即改写:日期/技能/持久上下文 | 关心"模型凭什么知道今天几号、会用什么技能" |
+| `middleware-06-conversation-management.md` | 21、22、23、24、25 | 对话生命周期:压缩/待办/用量/标题/记忆 | 关心上下文变短、标题、记忆入库 |
+| `middleware-07-vision-routing.md` | 26、27、28、29、30 | 视觉注入、MCP 延迟工具路由/审计/过滤、系统消息合并 | 关心图片、tool_search 机制 |
+| `middleware-08-safety-guards.md` | 31、32、33、36、37、38、39 | 终止性与收尾:限额/循环/预算/空回复/澄清 | 关心 run 为什么停、怎么停、扩展插哪 |
 
 三条推荐路径:
 
 1. **机制入门**:先读本章 §1,再读 `middleware-01` 的 §0("先建立心智模型")——
    那是全系列钩子体系讲得最透的一节;其余 7 篇的 0.x 节各自是"本篇主角的心智
    模型",按需回翻。
-2. **按链位顺序通读一遍地图** → `01 → 02 → 03 → 04`(共享基座 1–13,和链序
-   平行,注意 01 还含 #7、03 讲 #8–13)→ `05 → 06 → 07`(lead-only 上下文带,
-   14–26)→ `08`(27–35 一网打尽,且 §0.2/§0.3 是全系列对"收尾语义与插入点"
-   最权威的论述,本章 §6 即其浓缩)。
+2. **按链位顺序通读一遍地图** → `01 → 02 → 03 → 04`(共享基座 1–16,和链序
+   平行,注意 01 还含 #8、03 讲 #9–#16)→ `05 → 06 → 07`(lead-only 上下文/对话/
+   路由带,17–30)→ `08`(31–39 一网打尽,且 §0.2/§0.3 是全系列对"收尾语义与插
+   入点"最权威的论述,本章 §6 即其浓缩)。
 3. **按需深挖**:遇到具体中间件的行为疑问,用本章 §4 速查表的深链直接跳到对应
    深文的对应小节——每篇的目录结构高度统一:「解决什么问题 → 钩子与执行时机/
    链位置 → 伪代码/图 → 与邻居的协作 → 键与常量速查」,定位成本很低。
 
 **深文里看什么、不看什么**:深文是"为什么"——状态机转移表、命令分类的位置
 盲区、ID-swap 的午夜纠正、receipt 的 2,000 字符预算与 r1..rN 渲染……这些细节
-本章刻意不重复;每篇标注的**源码行号指引**(如 `agent.py` ~613、`tool_error_
-handling_middleware.py` ~411)是"读代码时的路标"。注意:部分深文写作时对个别
-链位用了**物理编号**(如 doc-03 把 ToolErrorHandling 称"第 15 位")——遇到
-数字对不上时以本章 §4 的语义链位号为准,物理序见 §2.1。
+本章刻意不重复;每篇标注的**源码行号指引**(如 `agent.py`、`tool_error_
+handling_middleware.py`)是"读代码时的路标"。注意:部分深文可能对个别链位用了
+**物理编号**(装配序)——遇到数字对不上时以本章 §4 的语义链位号为准,物理序见
+§2.1。
 
 ---
 
-## 4. 35 链位职责速查表
+## 4. 39 链位职责速查表
 
 > 装配条件列:(恒)= 无条件装配;(可选:xxx)= 条件成立才装配,开关见 §5。
-> 「#13」为夹心槽,表内拆成两行展示其两端,链位仍记 13。
+> 「#15」为夹心槽,表内拆成两行展示其两端,链位仍记 15。
+> `KnowledgeScopeMiddleware` **不占独立链位**,紧跟在 1 之后;`#28` 为**职能分组编号**,
+> 物理位置靠前(见 §2.3)。
 
 | 链位 | 中间件 | 装配 | 钩子要点 | 一句话职责 | 深链 |
 |---|---|---|---|---|---|
 | 1 | `InputSanitizationMiddleware` | 恒 | `wrap_model_call` 最外 | 净化用户消息中的框架标签/边界,`original_user_content` 溯源;让所有内层(含重试)看到干净输入 | [middleware-01](../middleware/middleware-01-io-safety.md) |
-| 2 | `ToolOutputBudgetMiddleware` | 恒 | `wrap_tool_call` + `wrap_model_call` | 超大工具输出外化到 `.tool-results`(typed synopsis + read_file 引用),模型侧兜底截历史巨文 | [middleware-01](../middleware/middleware-01-io-safety.md) |
+| (随 1) | `KnowledgeScopeMiddleware` | 恒 | `before_agent` + `wrap_model_call` + `wrap_tool_call` | 只暴露 Gateway 准入的执行范围,抹除消息里的范围/展示数据;scope 禁用时拦 `knowledge_search`(不读存储/RAGFlow) | [middleware-01](../middleware/middleware-01-io-safety.md) |
+| 2 | `ToolOutputBudgetMiddleware` | 恒 | `wrap_tool_call` + `wrap_model_call` | 超大工具输出外化到 `.tool-results`(typed synopsis + read_file 引用);模型侧兜底截历史巨文,并消除被后续同路径读/写取代的 `write_file` 正文 | [middleware-01](../middleware/middleware-01-io-safety.md) |
 | 3 | `ToolResultSanitizationMiddleware` | 恒 | `wrap_tool_call` | 中和远程内容工具结果(web_fetch/web_search/image_search/web_capture + 一切 MCP 工具)的框架/注入标签 | [middleware-01](../middleware/middleware-01-io-safety.md) |
-| 4 | `ThreadDataMiddleware` | 恒 | `before_agent` | 建用户/线程目录(user-data/{workspace,uploads,outputs}),身份经 `resolve_runtime_user_id` 解析 | [middleware-02](../middleware/middleware-02-infrastructure.md) |
-| 5 | `UploadsMiddleware` | lead 恒;subagent 无 | `before_agent` | 把"本轮新上传"的文件清单注入对话,不泄露历史上传 | [middleware-02](../middleware/middleware-02-infrastructure.md) |
-| 6 | `SandboxMiddleware` | 恒 | `before/after_agent` | 获取沙箱存 `sandbox_id`、run 末归还;持有线程物理 skill 投影(子代理非 owner) | [middleware-02](../middleware/middleware-02-infrastructure.md) |
-| 7 | `DanglingToolCallMiddleware` | 恒(lead/subagent) | `wrap_model_call` | 为无响应的 tool_calls 注入占位 ToolMessage;净化畸形调用,防严格 provider 400 | [middleware-01](../middleware/middleware-01-io-safety.md) |
-| 8 | `LLMErrorHandlingMiddleware` | 恒 | `wrap_model_call` | provider/模型调用失败归一为可恢复的助手可见错误,含重试与限流 | [middleware-03](../middleware/middleware-03-error-handling.md) |
-| 9 | `GuardrailMiddleware`(授权适配器 +/或显式 provider,0–2 实例) | 可选:`authorization.enabled` / `guardrails.enabled` | `wrap_tool_call` 执行期门 | 执行前双重放行闸:授权先判(可省一次外部调用),护栏后判(含 tool_search);fail-closed、发布 `AuthorizationOutcome` | [middleware-03](../middleware/middleware-03-error-handling.md) |
-| 10 | `SandboxAuditMiddleware` | 恒 | `wrap_tool_call` | 沙箱 shell/文件操作命令分类审计;防注入是 defense-in-depth,**不是安全边界**(沙箱才是) | [middleware-03](../middleware/middleware-03-error-handling.md) |
-| 11 | `ReadBeforeWriteMiddleware` | 可选:`read_before_write.enabled`(默认开) | `wrap_tool_call` | 读改写门(#3857):未读/已过期内容禁止 write/str_replace;被拦结果打 `recoverable_by_model=True` | [middleware-04](../middleware/middleware-04-file-safety.md) |
-| 12 | `ToolProgressMiddleware` | 可选:`tool_progress.enabled` | `wrap_tool_call` | 结果质量停滞状态机(ACTIVE→WARNED→BLOCKED),按三类错误分级;与 LoopDetection 分工 | [middleware-04](../middleware/middleware-04-file-safety.md) |
-| 13(外) | `ToolReceiptMiddleware` | 可选:`verification.receipts_enabled`(默认开) | `wrap_tool_call` 最外 + `wrap_model_call` | 工具收据账本:确定性溯源打戳;短路结果也上账;模型前渲染隐藏账本 r1..rN(2K 字符预算) | [middleware-03](../middleware/middleware-03-error-handling.md) |
-| 13(内) | `ToolErrorHandlingMiddleware` | 恒 | `wrap_tool_call` 最内 | 真正执行工具;异常转 error ToolMessage + 戳 `deerflow_tool_meta`,让 run 可继续 | [middleware-03](../middleware/middleware-03-error-handling.md) |
-| 14 | `DynamicContextMiddleware` | 恒(lead);subagent 换 `SubagentDateContextMiddleware` | `before_agent` | 日期(+可选记忆)以 `<system-reminder>` 注入首条 HumanMessage,系统提示保持静态供 prefix-cache 复用 | [middleware-05](../middleware/middleware-05-context-injection.md) |
-| 15 | `SkillActivationMiddleware` | 恒(lead/subagent) | `wrap_model_call` | 检测 `/skill` 严格语法,注入 SKILL.md 正文为隐藏当轮上下文;与 16 共享 owner-token 互相认证 | [middleware-05](../middleware/middleware-05-context-injection.md) |
-| 16 | `SkillToolPolicyMiddleware` | 恒(lead/subagent) | `wrap_model_call` + `wrap_tool_call` | 激活后按 allowed-tools 裁 schema(模型不可见)+ 阻断越权执行;`task` 不豁免 | [middleware-05](../middleware/middleware-05-context-injection.md) |
-| 17 | `DurableContextMiddleware` | 恒(lead/subagent) | `before/after_model` + `wrap_model_call` | 委派账本/技能引用/压缩摘要投影为持久上下文;权威走 SystemMessage、不可信值走隐藏 HumanMessage 数据块 | [middleware-05](../middleware/middleware-05-context-injection.md) |
-| 18 | `DeerFlowSummarizationMiddleware` | 可选:`summarization.enabled` | `before_model` | 逼近 token 上限时压缩早期消息;保住最新真实用户请求;摘要写 `summary_text` 通道 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
-| 19 | `TodoMiddleware` | 可选:runtime `is_plan_mode` | 多钩子 | 待办清单 `write_todos`;防压缩丢待办、防带未完成待办草草收场 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
-| 20 | `TokenUsageMiddleware` | 可选:`token_usage.enabled` | `after_model` | 每次模型调用用量记账;子代理用量按消息位次归因回派发消息(幂等打标) | [middleware-06](../middleware/middleware-06-conversation-management.md) |
-| 21 | `TitleMiddleware` | 恒装配(内部按 `title.enabled`) | `after_model` | 首轮完整交换后自动起线程标题;同步路径只做本地回退,异步路径才调 LLM | [middleware-06](../middleware/middleware-06-conversation-management.md) |
-| 22 | `MemoryMiddleware` | 非 tool-mode 恒装;tool-mode 视后端 | `after_agent` | 整轮结束后把(user + 最终 AI)消息投进记忆队列,异步提取 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
-| 23 | `ViewImageMiddleware` | 可选:模型 `supports_vision` | `wrap_model_call` | base64 图片以隐藏消息只活在本次请求,checkpoint 只留 `viewed_images` 轻元数据;自清残留 | [middleware-07](../middleware/middleware-07-vision-routing.md) |
-| 24 | `McpRoutingMiddleware` | 可选:`tool_search.enabled` 且有路由索引 | `before_model` | 按最新真实用户消息意图,提前提升匹配的 deferred MCP schema(默认 top-3,只提升不执行) | [middleware-07](../middleware/middleware-07-vision-routing.md) |
-| 25 | `DeferredToolFilterMiddleware` | 可选:`tool_search.enabled` 且有 deferred 集 | `wrap_model_call` + `wrap_tool_call` | 隐藏 deferred(MCP)工具 schema,直到 tool_search/路由提升(读 `promoted`,hash 作用域) | [middleware-07](../middleware/middleware-07-vision-routing.md) |
-| 26 | `SystemMessageCoalescingMiddleware` | 恒 | `wrap_model_call` | 把每条 SystemMessage 合并成请求开头唯一一块;修严格后端(vLLM/SGLang/Qwen/Anthropic)拒收非开头系统消息 | [middleware-07](../middleware/middleware-07-vision-routing.md) |
-| 27 | `SubagentLimitMiddleware` | 可选:runtime `subagent_enabled` | `wrap_tool_call` | 截断超额 `task` 调用:每响应并发上限 + 每 run 委派总量上限(读持久委派账本按 run_id 计数) | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 28 | `LoopDetectionMiddleware` | 可选:`loop_detection.enabled` | `after_model` | 调用模式层死循环防护:重复相同 tool_calls → 剥调用、强制文本收尾、戳 `loop_capped` | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 29 | `TokenBudgetMiddleware` | 可选:`token_budget.enabled` | `after_model` + `wrap_model_call` | 每 run token 预算硬停,戳 `token_capped`(与 loop 对称的 stop-reason 通道) | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 30 | 自定义中间件 `custom_middlewares=[...]` | 程序注入 | 自定义 | **代码注入点**:`build_middlewares(custom_middlewares=[...])` 显式传入的实例列表,落在 27–29 之后、收尾段之前 | [middleware-08 §0.2](../middleware/middleware-08-safety-guards.md) |
-| 31 | 配置扩展中间件 `extensions.middlewares` | 可选:config 声明 | 自定义 | **配置注入点**:`module.path:ClassName`(零参构造)经 `resolve_class` 加载;缺失/非法装配期 loud fail;subagent 同列表 | [middleware-08 §0.2](../middleware/middleware-08-safety-guards.md) |
-| 32 | `TerminalResponseMiddleware` | 恒 | `wrap_model_call` | 空终态兜底:工具执行后返回空 AIMessage → 注入隐藏恢复提示重试一次;仍空则落可见错误回退 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 33 | `ModelLengthFinishReasonMiddleware` | 恒 | `after_model` | 长度封顶记账:检测 finish_reason=length/max_tokens → 戳 `model_length_capped`,内容原样保留 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 34 | `SafetyFinishReasonMiddleware` | 可选:`safety_finish_reason.enabled`(默认开) | `after_model` + `wrap_tool_call` | provider 安全终止(content_filter 等)时抑制工具执行——反向分派中**最先**看到原始输出 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
-| 35 | `ClarificationMiddleware` | 恒(必须最后) | `wrap_tool_call` + `after_model` | 拦截 `ask_clarification`:`Command(goto=END)` 中断问人,剥同批 sibling;表单 v1/v2 校验原子化 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 4 | `PiiRedactionMiddleware` | 可选:`pii_redaction.enabled`(默认关) | `wrap_model_call` + `wrap_tool_call` | 把真实用户消息与远程工具结果里的 PII 改写为不可逆、值派生的占位符(确定性正则探测器);最内 L1 包装 | [middleware-01](../middleware/middleware-01-io-safety.md) |
+| 5 | `ThreadDataMiddleware` | 恒 | `before_agent` | 建用户/线程目录(user-data/{workspace,uploads,outputs}),身份经 `resolve_runtime_user_id` 解析 | [middleware-02](../middleware/middleware-02-infrastructure.md) |
+| 6 | `UploadsMiddleware` | lead 恒;subagent 无 | `before_agent` | 把"本轮新上传"的文件清单注入对话,不泄露历史上传 | [middleware-02](../middleware/middleware-02-infrastructure.md) |
+| 7 | `SandboxMiddleware` | 恒 | `before/after_agent` | 获取沙箱存 `sandbox_id`、run 末归还;持有线程物理 skill 投影(子代理非 owner) | [middleware-02](../middleware/middleware-02-infrastructure.md) |
+| 8 | `DanglingToolCallMiddleware` | 恒(lead/subagent) | `wrap_model_call` | 为无响应的 tool_calls 注入占位 ToolMessage;净化畸形调用,防严格 provider 400 | [middleware-01](../middleware/middleware-01-io-safety.md) |
+| 9 | `LLMErrorHandlingMiddleware` | 恒 | `wrap_model_call` | provider/模型调用失败归一为可恢复的助手可见错误,含重试与限流 | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 10 | `ArtifactResolutionMiddleware` | 可选:`tool_artifacts.enabled` 且 `resolve_handles_in_args`(默认开) | `wrap_tool_call` | 把调用参数里的 artifact 句柄(`art_xxxxxxxx`)解析为真实引用后再执行;未知句柄错误也进账本 | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 11 | `GuardrailMiddleware`(授权适配器 +/或显式 provider,0–2 实例) | 可选:`authorization.enabled` / `guardrails.enabled` | `wrap_tool_call` 执行期门 | 执行前双重放行闸:授权先判(可省一次外部调用),护栏后判(含 tool_search);fail-closed、发布 `AuthorizationOutcome` | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 12 | `SandboxAuditMiddleware` | 恒 | `wrap_tool_call` | 沙箱 shell/文件操作命令分类审计;防注入是 defense-in-depth,**不是安全边界**(沙箱才是) | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 13 | `ReadBeforeWriteMiddleware` | 可选:`read_before_write.enabled`(默认开) | `wrap_tool_call` | 读改写门(#3857):未读/已过期内容禁止 write/str_replace;被拦结果打 `recoverable_by_model=True` | [middleware-04](../middleware/middleware-04-file-safety.md) |
+| 14 | `ToolProgressMiddleware` | 可选:`tool_progress.enabled`(默认关) | `wrap_tool_call` | 结果质量停滞状态机(ACTIVE→WARNED→BLOCKED),按三类错误分级;与 LoopDetection 分工 | [middleware-04](../middleware/middleware-04-file-safety.md) |
+| 15(外) | `ToolReceiptMiddleware` | 可选:`verification.receipts_enabled`(默认开) | `wrap_tool_call` 最外 + `wrap_model_call` | 工具收据账本:确定性溯源打戳;短路结果也上账;模型前渲染隐藏账本 r1..rN(2K 字符预算) | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 15(内) | `ToolErrorHandlingMiddleware` | 恒 | `wrap_tool_call` 最内 | 真正执行工具;异常转 error ToolMessage + 戳 `deerflow_tool_meta`,让 run 可继续 | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 16 | `ArtifactCaptureMiddleware` | 可选:`tool_artifacts.enabled`(默认开) | `before_model` | 从工具结果捕获 artifact 引用入 `ThreadState.tool_artifacts`,扛过压缩;模型按短句柄引用 | [middleware-03](../middleware/middleware-03-error-handling.md) |
+| 17 | `DynamicContextMiddleware` | 恒(lead);subagent 换 `SubagentDateContextMiddleware` | `before_agent` | 日期(+可选记忆)以 `<system-reminder>` 注入首条 HumanMessage,系统提示保持静态供 prefix-cache 复用 | [middleware-05](../middleware/middleware-05-context-injection.md) |
+| 18 | `SkillActivationMiddleware` | 恒(lead/subagent) | `wrap_model_call` | 检测 `/skill` 严格语法,注入 SKILL.md 正文为隐藏当轮上下文;与 19 共享 owner-token 互相认证 | [middleware-05](../middleware/middleware-05-context-injection.md) |
+| 19 | `SkillToolPolicyMiddleware` | 恒(lead/subagent) | `wrap_model_call` + `wrap_tool_call` | 激活后按 allowed-tools 裁 schema(模型不可见)+ 阻断越权执行;`task` 不豁免 | [middleware-05](../middleware/middleware-05-context-injection.md) |
+| 20 | `DurableContextMiddleware` | 恒(lead/subagent) | `before/after_model` + `wrap_model_call` | 委派账本/技能引用/压缩摘要投影为持久上下文;权威走 SystemMessage、不可信值走隐藏 HumanMessage 数据块 | [middleware-05](../middleware/middleware-05-context-injection.md) |
+| 21 | `DeerFlowSummarizationMiddleware` | 可选:`summarization.enabled` | `before_model` | 逼近 token 上限时压缩早期消息;保住最新真实用户请求;摘要写 `summary_text` 通道 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
+| 22 | `TodoMiddleware` | 可选:runtime `is_plan_mode` | 多钩子 | 待办清单 `write_todos`;防压缩丢待办、防带未完成待办草草收场 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
+| 23 | `TokenUsageMiddleware` | 可选:`token_usage.enabled` | `after_model` | 每次模型调用用量记账;子代理用量按消息位次归因回派发消息(幂等打标) | [middleware-06](../middleware/middleware-06-conversation-management.md) |
+| 24 | `TitleMiddleware` | 恒装配(内部按 `title.enabled`) | `after_model` | 首轮完整交换后自动起线程标题;同步路径只做本地回退,异步路径才调 LLM | [middleware-06](../middleware/middleware-06-conversation-management.md) |
+| 25 | `MemoryMiddleware` | 非 tool-mode 恒装;tool-mode 视后端 | `after_agent` | 整轮结束后把(user + 最终 AI)消息投进记忆队列,异步提取 | [middleware-06](../middleware/middleware-06-conversation-management.md) |
+| 26 | `ViewImageMiddleware` | 可选:模型 `supports_vision` | `wrap_model_call` | base64 图片以隐藏消息只活在本次请求,checkpoint 只留 `viewed_images` 轻元数据;自清残留 | [middleware-07](../middleware/middleware-07-vision-routing.md) |
+| 27 | `McpRoutingMiddleware` | 可选:`tool_search.enabled` 且有路由索引 | `before_model` | 按最新真实用户消息意图,提前提升匹配的 deferred MCP schema(默认 top-3,只提升不执行) | [middleware-07](../middleware/middleware-07-vision-routing.md) |
+| 28 | `DeferredToolPromotionAuditMiddleware` | 可选:构建期 deferred 集非空 | `wrap_tool_call` | 观测最终 `tool_search` Command 的提升结果(去重、子代理归因);物理位置靠前(见 §2.3) | [middleware-07](../middleware/middleware-07-vision-routing.md) |
+| 29 | `DeferredToolFilterMiddleware` | 可选:`tool_search.enabled` 且有 deferred 集 | `wrap_model_call` + `wrap_tool_call` | 隐藏 deferred(MCP)工具 schema,直到 tool_search/路由提升(读 `promoted`,hash 作用域) | [middleware-07](../middleware/middleware-07-vision-routing.md) |
+| 30 | `SystemMessageCoalescingMiddleware` | 恒 | `wrap_model_call` | 把每条 SystemMessage 合并成请求开头唯一一块;修严格后端(vLLM/SGLang/Qwen/Anthropic)拒收非开头系统消息 | [middleware-07](../middleware/middleware-07-vision-routing.md) |
+| 31 | `SubagentLimitMiddleware` | 可选:runtime `subagent_enabled` | `wrap_tool_call` | 截断超额 `task` 调用:每响应并发上限 + 每 run 委派总量上限(读持久委派账本按 run_id 计数) | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 32 | `LoopDetectionMiddleware` | 可选:`loop_detection.enabled` | `after_model` | 调用模式层死循环防护:重复相同 tool_calls → 剥调用、强制文本收尾、戳 `loop_capped` | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 33 | `TokenBudgetMiddleware` | 可选:`token_budget.enabled` | `after_model` + `wrap_model_call` | 每 run token 预算硬停,戳 `token_capped`(与 loop 对称的 stop-reason 通道) | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 34 | 自定义中间件 `custom_middlewares=[...]` | 程序注入 | 自定义 | **代码注入点**:`build_middlewares(custom_middlewares=[...])` 显式传入的实例列表,落在 31–33 之后、收尾段之前 | [middleware-08 §0.2](../middleware/middleware-08-safety-guards.md) |
+| 35 | 配置扩展中间件 `extensions.middlewares` | 可选:config 声明 | 自定义 | **配置注入点**:`module.path:ClassName`(零参构造)经 `resolve_class` 加载;缺失/非法装配期 loud fail;subagent 同列表 | [middleware-08 §0.2](../middleware/middleware-08-safety-guards.md) |
+| 36 | `TerminalResponseMiddleware` | 恒 | `wrap_model_call` | 空终态兜底:工具执行后返回空 AIMessage → 注入隐藏恢复提示重试一次;仍空则落可见错误回退 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 37 | `ModelLengthFinishReasonMiddleware` | 恒 | `after_model` | 长度封顶记账:检测 finish_reason=length/max_tokens → 戳 `model_length_capped`,内容原样保留 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 38 | `SafetyFinishReasonMiddleware` | 可选:`safety_finish_reason.enabled`(默认开) | `after_model` + `wrap_tool_call` | provider 安全终止(content_filter 等)时抑制工具执行——反向分派中**最先**看到原始输出 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
+| 39 | `ClarificationMiddleware` | 恒(必须最后) | `wrap_tool_call` + `after_model` | 拦截 `ask_clarification`:`Command(goto=END)` 中断问人,剥同批 sibling;表单 v1/v2 校验原子化 | [middleware-08](../middleware/middleware-08-safety-guards.md) |
 
 ---
 
@@ -337,57 +364,61 @@ configurable(`config.configurable`)只有两处(`is_plan_mode`、
 
 | 链位 | 装配条件 | 默认 | 备注 |
 |---|---|---|---|
-| 9 | `authorization.enabled` / `guardrails.enabled`(+ provider) | 关 | 授权适配器与显式护栏相互独立,0–2 实例 |
-| 11 | `read_before_write.enabled` | 开 | 最外层写门;装在 ToolProgress 之外免得拦写消耗停滞槽 |
-| 12 | `tool_progress.enabled` | 开 | 结果质量状态机 |
-| 13(外) | `verification.receipts_enabled`;渲染模式 `verification.receipts_render_mode` | 开 / `delegation_only`(lead) | 打戳恒开,渲染模式 lead 只渲染委派结果、subagent `always` |
-| 18 | `summarization.enabled` | 视部署 | lead 与 subagent 读同一开关,不会漂移 |
-| 19 | runtime `config.configurable.is_plan_mode` | 关 | 唯一"按请求"可变的装配位 |
-| 20 | `token_usage.enabled` | 关 | |
-| 21 | 恒装配,`title.enabled` 内部判定 | 开 | 装配期无法关闭,但可经 title 配置关闭行为 |
-| 22 | 非 tool-mode 恒装;`memory.mode=tool` 时仅当后端要求被动写入 | 视 memory 配置 | 子代理链永远不装(与父线程共享 thread_id) |
-| 23 | 运行时模型 `supports_vision` | 模型相关 | 装配读的是**解析后**的 model_name,非旧 config |
-| 24/25 | `tool_search.enabled` 且构建期 deferred 集非空 | 关 | 24 依赖 25 存在;25 空集时纯 no-op |
-| 27 | runtime `subagent_enabled` | 关 | 限额另有 runtime `max_concurrent_subagents` / `max_total_subagents` |
-| 28 | `loop_detection.enabled` | 视部署 | lead 与 subagent 均受控 |
-| 29 | `token_budget.enabled` | lead 默认关;subagent 默认开 | subagent 默认上限与 `summarization.enabled` 耦合(1M/2M),用户显式值永远优先 |
-| 30/31 | 恒为 0..N 个插入实例 | 无 | 见 §6 |
-| 34 | `safety_finish_reason.enabled` | 开 | |
+| 4 | `pii_redaction.enabled`(+ 非空 `token_secret`) | 关 | 仅当开启;开启时要求 ≥16 字符的部署级 HMAC 密钥 |
+| 10 | `tool_artifacts.enabled` 且 `resolve_handles_in_args` | 开 | 调用参数里的 artifact 句柄解析 |
+| 11 | `authorization.enabled` / `guardrails.enabled`(+ provider) | 关 | 授权适配器与显式护栏相互独立,0–2 实例 |
+| 13 | `read_before_write.enabled` | 开 | 最外层写门;装在 ToolProgress 之外免得拦写消耗停滞槽 |
+| 14 | `tool_progress.enabled` | 关 | 结果质量状态机 |
+| 15(外) | `verification.receipts_enabled`;渲染模式 `verification.receipts_render_mode` | 开 / `delegation_only`(lead) | 打戳恒开,渲染模式 lead 只渲染委派结果、subagent `always` |
+| 16 | `tool_artifacts.enabled` | 开 | artifact 引用捕获入 state;`inject_model_context` 决定是否投影回模型 |
+| 21 | `summarization.enabled` | 视部署 | lead 与 subagent 读同一开关,不会漂移 |
+| 22 | runtime `config.configurable.is_plan_mode` | 关 | 唯一"按请求"可变的装配位 |
+| 23 | `token_usage.enabled` | 关 | |
+| 24 | 恒装配,`title.enabled` 内部判定 | 开 | 装配期无法关闭,但可经 title 配置关闭行为 |
+| 25 | 非 tool-mode 恒装;`memory.mode=tool` 时仅当后端要求被动写入 | 视 memory 配置 | 子代理链永远不装(与父线程共享 thread_id) |
+| 26 | 运行时模型 `supports_vision` | 模型相关 | 装配读的是**解析后**的 model_name,非旧 config |
+| 27/29 | `tool_search.enabled` 且构建期 deferred 集非空 | 关 | 27 依赖 29 存在;29 空集时纯 no-op |
+| 28 | 构建期 deferred 集非空 | 关 | 与 27/29 同条件;物理位置靠前(见 §2.3) |
+| 31 | runtime `subagent_enabled` | 关 | 限额另有 runtime `max_concurrent_subagents` / `max_total_subagents` |
+| 32 | `loop_detection.enabled` | 视部署 | lead 与 subagent 均受控 |
+| 33 | `token_budget.enabled` | lead 默认关;subagent 默认开 | subagent 默认上限与 `summarization.enabled` 耦合(1M/2M),用户显式值永远优先 |
+| 34/35 | 恒为 0..N 个插入实例 | 无 | 见 §6 |
+| 38 | `safety_finish_reason.enabled` | 开 | |
 
 **关闭某中间件的调试法**:所有可选位都能用对应开关"摘除"后重跑复现实验
-(§8)。基座里四个恒装的非可选位(#1/#2/#3/#4 等)没有开关——这是有意的:
+(§8)。基座里那些恒装的非可选位(#1/#2/#3/#5 等)没有开关——这是有意的:
 它们是"正确性基座",想关只能临时改装配代码(改 `_build_runtime_middlewares`
 的清单),不要在生产配置里找不存在的开关。
 
 ---
 
-## 6. 扩展插入点 30/31 与收尾 32–35:为什么"不可改写"
+## 6. 扩展插入点 34/35 与收尾 36–39:为什么"不可改写"
 
-全链只有**两个**合法的用户中间件插入点,都在 27–29 之后、32 之前:
+全链只有**两个**合法的用户中间件插入点,都在 31–33 之后、36 之前:
 
-- **#30 程序化**:`build_middlewares(..., custom_middlewares=[...])` ——
+- **#34 程序化**:`build_middlewares(..., custom_middlewares=[...])` ——
   代码里显式传入的实例列表(embedded `DeerFlowClient` 走同一条链,入口一致);
-- **#31 配置化**:`config.yaml` / `extensions_config.json` 的
+- **#35 配置化**:`config.yaml` / `extensions_config.json` 的
   `extensions.middlewares: ["module.path:ClassName", ...]` —— 零参构造、
   必须是 `AgentMiddleware` 子类、缺失包/非法类/坏模块在 **agent 创建期** loud
   fail。**信任边界**:该路径实例化任意代码,视为可信操作者输入;Gateway 的
   skill/MCP 写接口刻意不为它开写路径。子代理收到同一份列表,置于其 safety
   tail 之前。
 
-为什么必须落在 27–29 之后、32–35 之前?两条硬理由:
+为什么必须落在 31–33 之后、36–39 之前?两条硬理由:
 
-1. **不得早于 Loop(28)/Token(29)**:若插在它们之前,你的 `after_model` 会先
+1. **不得早于 Loop(32)/Token(33)**:若插在它们之前,你的 `after_model` 会先
    看到"尚未被剥 tool_calls"的失控响应——死循环/超预算的硬停语义被你架空了。
-2. **不得晚于 Clarification(35),且 32–35 之间没有注册位**:收尾段是一个
+2. **不得晚于 Clarification(39),且 36–39 之间没有注册位**:收尾段是一个
    "反向分派顺序被精确调过"的闭环——Clarification 的中断原子性
    (`Command(goto=END)` 短路工具环)要求它物理最后;任何在它之后注册的东西都会
-   先于它看到模型输出、可能放行它已经剥掉的 sibling。所以 32–35 是**语义上不
-   可被扩展改写**的:TerminalResponse(32)注册最早(反向分派最后触发,兜底要看
-   到 Safety 等所有改写后的**最终**状态)、ModelLength(33)记账、Safety(34)反向
-   最先剥安全终止的调用、Clarification(35)收口问人。想观察"最终请求"的扩展用
+   先于它看到模型输出、可能放行它已经剥掉的 sibling。所以 36–39 是**语义上不
+   可被扩展改写**的:TerminalResponse(36)注册最早(反向分派最后触发,兜底要看
+   到 Safety 等所有改写后的**最终**状态)、ModelLength(37)记账、Safety(38)反向
+   最先剥安全终止的调用、Clarification(39)收口问人。想观察"最终请求"的扩展用
    `MODEL_PHYSICAL` 锚点(落在 Safety 之后、Clarification 之前),想观察"原始
    工具结果"用 `TOOL_RAW`(§2.4)——**锚点机制就是给扩展的、受控的"伪插入点"**,
-   与 30/31 的裸插入互为补充。
+   与 34/35 的裸插入互为补充。
 
 ---
 
@@ -431,13 +462,13 @@ class MyMiddleware(AgentMiddleware[ThreadState]):
 ### 7.2 注入与验证
 
 ```python
-# 程序化注入(#30)—— 与 make_lead_agent / DeerFlowClient 同一入口
+# 程序化注入(#34)—— 与 make_lead_agent / DeerFlowClient 同一入口
 from deerflow.agents.lead_agent.agent import build_middlewares
 chain = build_middlewares(config, model_name,
                           custom_middlewares=[MyMiddleware()])
 ```
 
-配置化注入(#31):
+配置化注入(#35):
 
 ```yaml
 # config.yaml
@@ -478,17 +509,17 @@ Contributed by: <扩展名>`——先读这条消息,它已经点名了谁该为
 **4. 区分三类"没执行"的根因。** 一个工具调用没跑,先查它是被哪一层拦的:
 (a) 模型侧没发出调用(Safety 剥了 tool_calls / TokenBudget 硬停 / LoopDetection
 硬停 → 看 stop_reason: `safety_terminated` / `token_capped` / `loop_capped`);
-(b) wrap_tool_call 短路(#9 拒绝 / #11 拦写 → 看返回的 ToolMessage.status 与
-`deerflow_tool_meta`);(c) 执行了但异常被 #13(内)转成 error ToolMessage
+(b) wrap_tool_call 短路(#11 拒绝 / #13 拦写 → 看返回的 ToolMessage.status 与
+`deerflow_tool_meta`);(c) 执行了但异常被 #15(内)转成 error ToolMessage
 (content 以 `Error: Tool 'xxx' failed with ...` 开头)。短路消息会自戳
 `deerflow_tool_meta` 或回退到 `message.status`;正常结果由 ToolErrorHandling
 在**内层返回路径**上打戳,外层 ToolReceipt 才能据此记账——这也是
-#13"夹心"结构存在的意义。
+#15"夹心"结构存在的意义。
 
-**5. after_model 行为"看起来反了"是常态。** 调试 32–35 或任何多 after_model
+**5. after_model 行为"看起来反了"是常态。** 调试 36–39 或任何多 after_model
 中间件交互时,永远先把"注册顺序"倒过来推:最后注册的最先执行(§1.3)。
-Safety(34)想看到原始输出,所以它**注册得最晚**(只早于 Clarification);
-TerminalResponse(32)要看最终状态,所以它**注册得最早**。反直觉,但这就是设计。
+Safety(38)想看到原始输出,所以它**注册得最晚**(只早于 Clarification);
+TerminalResponse(36)要看最终状态,所以它**注册得最早**。反直觉,但这就是设计。
 
 **6. subagent 行为异常先查归属。** 子代理链复用基座但参数不同:无 Uploads、
 receipt 渲染 `always`、`owns_agent_skill_projection=False`、Summarization 带
@@ -501,14 +532,15 @@ receipt 渲染 `always`、`owns_agent_skill_projection=False`、Summarization �
 
 | 想看什么 | 去哪看 |
 |---|---|
-| 35 链位权威语义(含可选位注释) | `agents/middlewares/AGENTS.md`(中间件链一节) |
-| 基座装配(1–13,物理序) | `agents/middlewares/tool_error_handling_middleware.py::_build_runtime_middlewares`(L161) |
-| lead 基座入口 | 同文件 `build_lead_runtime_middlewares`(L318) |
-| subagent 装配(基座变体 + 追加段) | 同文件 `build_subagent_runtime_middlewares`(L343) |
-| lead-only 追加段(14–35) | `agents/lead_agent/agent.py::build_middlewares`(L457,文件头 L447 起有顺序注释) |
+| 39 链位权威语义(含可选位注释) | `agents/middlewares/AGENTS.md`(中间件链一节) |
+| 基座装配(1–16,物理序) | `agents/middlewares/tool_error_handling_middleware.py::_build_runtime_middlewares`(L346) |
+| lead 基座入口 | 同文件 `build_lead_runtime_middlewares`(L537) |
+| subagent 装配(基座变体 + 追加段) | 同文件 `build_subagent_runtime_middlewares`(L566) |
+| lead-only 追加段(17–39) | `agents/lead_agent/agent.py::build_middlewares`(L482,文件头 L472 起有顺序注释) |
+| 声明工具收窄/复核(装配后,授权路径) | `agents/middlewares/tool_declarations.py::narrow_declared_tools` / `verify_declared_tool_view` |
 | 顺序不变量声明与校验 | `extensions/ordering.py::core_ordering_constraints` / `assert_ordering` |
 | 扩展 Placement 锚点 | `extensions/stack.py::_anchors`(MODEL_LOGICAL / MODEL_PHYSICAL / TOOL_VISIBLE / TOOL_RAW / STANDARD) |
-| 配置扩展中间件加载(#31) | `agents/middlewares/configured_extensions.py::load_configured_extension_middlewares` |
+| 配置扩展中间件加载(#35) | `agents/middlewares/configured_extensions.py::load_configured_extension_middlewares` |
 | 链的描述/可观测 | `agents/assembly_descriptor.py::build_assembly_descriptor` / `describe_middleware` |
 | provenance 键 | `deerflow_extension_api.provenance`(`provenance_kwargs()`);工具变换轨迹见 `agents/middlewares/tool_transform_meta.py` |
 | 单个中间件源码 | `agents/middlewares/<name>_middleware.py`(与深文行号指引对照) |

@@ -1,4 +1,4 @@
-# 错误处理与安全守卫中间件：失败归一化 · 授权 · 审计 · 凭证（链位 8、9、10、13）
+# 错误处理与安全守卫中间件：失败归一化 · 授权 · 审计 · 凭证 · artifact（链位 9、10、11、12、15、16）
 
 > 本篇聚焦 shared runtime base 里负责「工具调用从模型发出到结果回灌模型」的安全与错误处理中间件：把 provider 失败恢复成 assistant 可读消息、执行前授权、bash 命令分级审计、为每次执行打不可伪造的凭证、把异常变成结构化信号。阅读目标：搞懂「中途会经过几道门、谁把异常变成结构化信号、谁为每次执行打不可伪造的凭证」。
 > 源码相对路径：`backend/packages/harness/deerflow/agents/middlewares/`；链装配基线见 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 与 [目录索引](README.md)。
@@ -7,16 +7,18 @@
 
 | 链位 | 中间件 | 一句话职责 | 主钩子 | 装配条件 |
 |---|---|---|---|---|
-| 8 | `LLMErrorHandlingMiddleware` | provider 失败归一化 + 重试/熔断 | `wrap_model_call`（基座最内） | 恒装配 |
-| 9 | `Authorization / GuardrailMiddleware` | 执行前（Layer 2）授权 + 外部 guardrail | `wrap_tool_call` | `authorization.enabled` / `guardrails.enabled` |
-| 10 | `SandboxAuditMiddleware` | bash 命令分级 block/warn/pass + 审计 | `wrap_tool_call`（仅 bash） | 恒装配 |
-| 13 | `ToolReceiptMiddleware` | 每条结果打确定性凭证 + 渲染账本 | `wrap_tool_call`（最外） + `wrap_model_call` | `verification.receipts_enabled`（默认开） |
-| 13 | `ToolErrorHandlingMiddleware` | 异常 → 结构化 error ToolMessage + stamp meta | `wrap_tool_call`（最内） | 恒装配 |
+| 9 | `LLMErrorHandlingMiddleware` | provider 失败归一化 + 重试/熔断 | `wrap_model_call`（基座最内） | 恒装配 |
+| 10 | `ArtifactResolutionMiddleware` | 工具参数里的 artifact 句柄解析为真实引用 | `wrap_tool_call` | `tool_artifacts.enabled` + `resolve_handles_in_args`（默认开） |
+| 11 | `Authorization / GuardrailMiddleware` | 执行前（Layer 2）授权 + 外部 guardrail | `wrap_tool_call` | `authorization.enabled` / `guardrails.enabled` |
+| 12 | `SandboxAuditMiddleware` | bash 命令分级 block/warn/pass + 审计 | `wrap_tool_call`（仅 bash） | 恒装配 |
+| 15 | `ToolReceiptMiddleware` | 每条结果打确定性凭证 + 渲染账本 | `wrap_tool_call`（最外） + `wrap_model_call` | `verification.receipts_enabled`（默认开） |
+| 15 | `ToolErrorHandlingMiddleware` | 异常 → 结构化 error ToolMessage + stamp meta | `wrap_tool_call`（最内） | 恒装配 |
+| 16 | `ArtifactCaptureMiddleware` | 从工具结果捕获 artifact 引用入 state | `before_model` | `tool_artifacts.enabled`（默认开） |
 
-> **链位口径**：本篇**全文件**统一采用 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 的 1–35 编号：LLMErrorHandling=8、Authorization/Guardrail（授权 + 外部 guardrail 同属第 9 位）=9、SandboxAudit=10、ReadBeforeWrite=11、ToolProgress=12、ToolReceipt+ToolErrorHandling=13。**注意第 13 位是「成对条目」**：AGENTS.md 把它编成一条 `ToolReceiptMiddleware + ToolErrorHandlingMiddleware` —— 前者在 wrap_tool_call 栈**最外**、后者在**最内**，作为一对夹住 9–12 的短路者；所以下表 ToolReceipt / ToolErrorHandling 两个类都标第 13 位，属有意分组而非重复编号。
+> **链位口径**：本篇**全文件**统一采用 [`agents/middlewares/AGENTS.md`](../../backend/packages/harness/deerflow/agents/middlewares/AGENTS.md) 的 1–39 编号：LLMErrorHandling=9、ArtifactResolution=10、Authorization/Guardrail（授权 + 外部 guardrail 同属第 11 位）=11、SandboxAudit=12、ReadBeforeWrite=13、ToolProgress=14、ToolReceipt+ToolErrorHandling=15、ArtifactCapture=16。**注意第 15 位是「成对条目」**：AGENTS.md 把它编成一条 `ToolReceiptMiddleware + ToolErrorHandlingMiddleware` —— 前者在 wrap_tool_call 栈**最外**、后者在**最内**，作为一对夹住 10–14 的短路者；所以下表 ToolReceipt / ToolErrorHandling 两个类都标第 15 位，属有意分组而非重复编号。
 ---
 
-## 0. 装配位置：shared runtime base 里的第 8~13 位
+## 0. 装配位置：shared runtime base 里的第 9~16 位
 ### 0.1 三段式装配与 tail 追加顺序
 
 lead / subagent 共用的 shared runtime base 由 `agents/middlewares/tool_error_handling_middleware.py` 里的
@@ -28,24 +30,26 @@ lead / subagent 共用的 shared runtime base 由 `agents/middlewares/tool_error
 - `tail`（本文主角，lead 全开时的 1-based 下标，`(opt)` 表示可选、条件追加）：
 
 ```
- 7 DanglingToolCallMiddleware  (include_dangling_tool_call_patch=True)
- 8 LLMErrorHandlingMiddleware   第 8 位：把 provider 调用失败恢复成 assistant 可读消息（模型调用轴）
- 9 GuardrailMiddleware(授权)    (opt, authorization.enabled)      ← AGENTS.md 9：Layer 2：GuardrailAuthorizationAdapter
- 9 GuardrailMiddleware(外部)    (opt, guardrails.enabled+provider) ← 仍属 AGENTS.md 9（外部 guardrail 追加在内层）
-10 SandboxAuditMiddleware       bash 命令分级审计
-11 ReadBeforeWriteMiddleware   (opt, read_before_write.enabled 默认开)
-12 ToolProgressMiddleware      (opt, tool_progress.enabled)
-13 ToolReceiptMiddleware       (opt, verification.receipts_enabled 默认开) ── 最外层 wrap_tool_call
-13 ToolErrorHandlingMiddleware  最内层：异常 → 结构化 error ToolMessage
+ 8 DanglingToolCallMiddleware  (include_dangling_tool_call_patch=True)
+ 9 LLMErrorHandlingMiddleware   第 9 位：把 provider 调用失败恢复成 assistant 可读消息（模型调用轴）
+10 ArtifactResolutionMiddleware (opt, tool_artifacts.enabled + resolve_handles_in_args 默认开) ── 解析参数里的 artifact 句柄
+11 GuardrailMiddleware(授权)    (opt, authorization.enabled)      ← AGENTS.md 11：Layer 2：GuardrailAuthorizationAdapter
+11 GuardrailMiddleware(外部)    (opt, guardrails.enabled+provider) ← 仍属 AGENTS.md 11（外部 guardrail 追加在内层）
+12 SandboxAuditMiddleware       bash 命令分级审计
+13 ReadBeforeWriteMiddleware   (opt, read_before_write.enabled 默认开)
+14 ToolProgressMiddleware      (opt, tool_progress.enabled)
+15 ToolReceiptMiddleware       (opt, verification.receipts_enabled 默认开) ── 最外层 wrap_tool_call
+15 ToolErrorHandlingMiddleware  最内层：异常 → 结构化 error ToolMessage
+16 ArtifactCaptureMiddleware   (opt, tool_artifacts.enabled 默认开) ── `before_model` 捕获，不参与 wrap 栈
 ```
 
 base 拼完后，lead-only 中间件（`DynamicContextMiddleware` 起约 18 个）由 `lead_agent/agent.py::build_middlewares()`
 **追加在 base 之后**；最后在 `extensions/stack.py::compose_with_extensions()`（最外层 builder 末尾、扩展贡献合并完成后）
 对整条链做 `assert_ordering` 校验——提前校验会让扩展悄悄反转不变式而不报错。
 
-> **编号口径**：全文件统一用 `agents/middlewares/AGENTS.md` 的条目编号——8 LLMErrorHandling、9 Authorization/Guardrail（授权 + 外部 guardrail 同属第 9 位）、10 SandboxAudit、11 ReadBeforeWrite、12 ToolProgress、13 ToolReceipt+ToolErrorHandling。注意编号是**职能分组**而非严格嵌套下标：真实执行顺序里 `ToolReceiptMiddleware` 是**最外层** wrap_tool_call、`ToolErrorHandlingMiddleware` 永远在**最内层**，两者同属第 13 位，恰好「一对夹住 9~12 短路者」（receipt 在外、error handling 在内）。嵌套细节见 §0.2 的顺序契约。
+> **编号口径**：全文件统一用 `agents/middlewares/AGENTS.md` 的条目编号——9 LLMErrorHandling、10 ArtifactResolution、11 Authorization/Guardrail（授权 + 外部 guardrail 同属第 11 位）、12 SandboxAudit、13 ReadBeforeWrite、14 ToolProgress、15 ToolReceipt+ToolErrorHandling、16 ArtifactCapture。注意编号是**职能分组**而非严格嵌套下标：真实执行顺序里 `ToolReceiptMiddleware` 是**最外层** wrap_tool_call、`ToolErrorHandlingMiddleware` 永远在**最内层**，两者同属第 15 位，恰好「一对夹住 10~14 短路者」（receipt 在外、error handling 在内）；`ArtifactResolutionMiddleware`（第 10 位）虽编号更小，物理上排在 ToolReceipt 之内、Guardrail 之外。嵌套细节见 §0.2 的顺序契约。
 
-### 0.2 组合语义与两条硬不变式
+### 0.2 组合语义与顺序硬不变式
 
 LangChain 组合规则（代码注释原文："compose with first in list as outermost layer"）：**列表下标越小越靠外**，
 `wrap_model_call` / `wrap_tool_call` 按「外层先执行、再调内层 handler」嵌套；`after_model` 类钩子按逆序分发。
@@ -56,8 +60,11 @@ LangChain 组合规则（代码注释原文："compose with first in list as out
 ```python
 ToolProgressMiddleware  outer of ToolErrorHandlingMiddleware  # Progress 要在内层返回路径读到 meta
 ToolReceiptMiddleware   outer of ToolErrorHandlingMiddleware  # Receipt 要用 meta.status 生成凭证
-ToolReceiptMiddleware   outer of {Guardrail, SandboxAudit, ReadBeforeWrite, ToolProgress}
-                        # ↑ 这四个都可能短路/重建 ToolMessage；receipt 不包住它们，账本就静默漏记
+ToolReceiptMiddleware   outer of {ArtifactResolution, Guardrail, SandboxAudit, ReadBeforeWrite, ToolProgress}
+                        # ↑ 这些都可能短路/重建 ToolMessage；receipt 不包住它们，账本就静默漏记
+ArtifactResolutionMiddleware outer of {Guardrail, SandboxAudit, ReadBeforeWrite, ToolProgress}
+                        # ↑ artifact 句柄必须在「按参数做决定的授权/审计/写门/进度」之前解析成真实引用，
+                        #   否则策略看到的是句柄而非真实目标（参数敏感决策必须基于解析后的参数）
 ```
 
 一条 `bash` 工具调用的完整进出路径（只画本组中间件，由上到下 = 由外到内）：
@@ -65,28 +72,33 @@ ToolReceiptMiddleware   outer of {Guardrail, SandboxAudit, ReadBeforeWrite, Tool
 ```
 模型响应带 tool_calls
    ▼
-[8  LLMErrorHandling]   重试/退避/熔断：provider 失败拦在这一层（9~13 感知不到调用失败过）— 模型调用轴
+[9  LLMErrorHandling]   重试/退避/熔断：provider 失败拦在这一层（10~16 感知不到调用失败过）— 模型调用轴
    ▼ 下为 wrap_tool_call 由外到内：
-[13 ToolReceipt]        最外层 wrap_tool_call：结果（含被短路者）返回时第一个打 receipt
+[15 ToolReceipt]        最外层 wrap_tool_call：结果（含被短路者）返回时第一个打 receipt
    ▼
-[9  Guardrail(授权)]    Layer 2 执行期授权：deny 在此短路，不进 10/11/12…
-[9  Guardrail(外部)]    显式配置的 GuardrailProvider，仍评估每个调用（含 tool_search）
+[10 ArtifactResolution] (opt) 参数里的 artifact 句柄解析为真实引用（未知/过期句柄 → error，不执行）
    ▼
-[10 SandboxAudit]       只查 bash：block 短路；warn 放行但重建结果并附加警告
-[11 ReadBeforeWrite]    (opt) 写门：blocked 短路（自 stamp meta）
-[12 ToolProgress]       (opt) 结果质量状态机（读 13 打的 meta）
+[11 Guardrail(授权)]    Layer 2 执行期授权：deny 在此短路，不进 12/13/14…
+[11 Guardrail(外部)]    显式配置的 GuardrailProvider，仍评估每个调用（含 tool_search）
    ▼
-[13 ToolErrorHandling]  最内层：真正执行工具；异常 → 结构化错误 + stamp deerflow_tool_meta
+[12 SandboxAudit]       只查 bash：block 短路；warn 放行但重建结果并附加警告
+[13 ReadBeforeWrite]    (opt) 写门：blocked 短路（自 stamp meta）
+[14 ToolProgress]       (opt) 结果质量状态机（读 15 打的 meta）
+   ▼
+[15 ToolErrorHandling]  最内层：真正执行工具；异常 → 结构化错误 + stamp deerflow_tool_meta
    ▼
 ToolNode → 沙箱 handler
+
+（第 16 位 ArtifactCapture 走 `before_model`，不在 wrap 栈内：每次模型调用前扫 state 消息尾部，
+捕获结果里的 artifact 引用入 `ThreadState.tool_artifacts`，并跟踪后续调用对句柄的消费。）
 ```
 
-一个"错位"值得注意：第 13 位 ToolReceipt 的 `wrap_model_call` 是第 8 位 LLMErrorHandling 的**内层**——每次重试都会
+一个"错位"值得注意：第 15 位 ToolReceipt 的 `wrap_model_call` 是第 9 位 LLMErrorHandling 的**内层**——每次重试都会
 重新渲染一遍 ledger（ledger 从消息流派生、天然幂等）；LLM 调用彻底失败时 handler 抛异常，引用快照步骤不执行，
 但兜底消息本身不含引用，无影响。
 ---
 
-## 1. LLMErrorHandlingMiddleware（第 8 位）
+## 1. LLMErrorHandlingMiddleware（第 9 位）
 
 ### 它解决什么问题
 
@@ -103,7 +115,7 @@ ToolNode → 沙箱 handler
 
 ### 钩子与执行时机
 
-`wrap_model_call` / `awrap_model_call`。它是 shared base 里最内层的模型调用包裹者（第 8 位）：外层是
+`wrap_model_call` / `awrap_model_call`。它是 shared base 里最内层的模型调用包裹者（第 9 位）：外层是
 InputSanitization / ToolOutputBudget / ToolResultSanitization，所以它**看到的永远是消毒后的消息**；内层是
 ToolReceipt 的 ledger 渲染与真实模型调用。位置含义：provider 层面的失败在这里就被消化，下游阶段（工具执行、
 receipt、进度状态机）不需要知道模型调用失败过——除非失败到要返回兜底消息。
@@ -169,7 +181,7 @@ writer 发 `llm_retry` 事件（前端显示"正在重试 1/2"），事件发送
 
 ### 与邻居的关系
 
-- **对内（第 13 位 ToolReceipt）**：每次重试都重新走一遍内层 ledger 渲染——ledger 派生自消息流，幂等无副作用；
+- **对内（第 15 位 ToolReceipt）**：每次重试都重新走一遍内层 ledger 渲染——ledger 派生自消息流，幂等无副作用；
   调用成功才轮到 ToolReceipt 打引用快照；
 - **对模型调用链**：provider 原始错误**从不进入模型可见上下文**——模型只看到"重试后成功"或干净的中文兜底消息；
 - 兜底消息的 `deerflow_error_fallback` 标记是 run 收尾的重要信号：worker / 子代理执行器据此把 run 判为失败
@@ -193,7 +205,7 @@ writer 发 `llm_retry` 事件（前端显示"正在重试 1/2"），事件发送
 `_extract_retry_after_ms`/`_extract_error_detail`。
 ---
 
-## 2. GuardrailMiddleware（第 9 位：Authorization / GuardrailAuthorizationAdapter 双层门）
+## 2. GuardrailMiddleware（第 11 位：Authorization / GuardrailAuthorizationAdapter 双层门）
 
 ### 它解决什么问题
 
@@ -290,9 +302,9 @@ return denied_message if not decision.allow else handler(request)
 
 ### 与邻居的关系
 
-授权与外部 guardrail 同属第 9 位（授权在下标者外层：授权先 deny、外部调用不发生）；两者都在 SandboxAudit（10）之外
-（授权不过，命令审计看不到这条命令）；两者都在 ToolReceipt（13）**之内**——deny 短路产生的 `status="error"`
-ToolMessage **没有** `deerflow_tool_meta`（GuardrailMiddleware 不调 `normalize_tool_result`），但它穿过第 9 位时
+授权与外部 guardrail 同属第 11 位（授权在下标者外层：授权先 deny、外部调用不发生）；两者都在 SandboxAudit（12）之外
+（授权不过，命令审计看不到这条命令）；两者都在 ToolReceipt（15）**之内**——deny 短路产生的 `status="error"`
+ToolMessage **没有** `deerflow_tool_meta`（GuardrailMiddleware 不调 `normalize_tool_result`），但它穿过第 11 位时
 被最外层 ToolReceipt 兜住：`make_tool_receipt` 回退 `message.status="error"`，账本不缺这条记录
 （这正是 receipt 必须最外层的原因之一）。
 
@@ -315,7 +327,7 @@ ToolMessage **没有** `deerflow_tool_meta`（GuardrailMiddleware 不调 `normal
 `docs/plans/2026-07-10-pluggable-authorization-rfc.md`。
 ---
 
-## 3. SandboxAuditMiddleware（第 10 位）
+## 3. SandboxAuditMiddleware（第 12 位）
 
 ### 它解决什么问题
 
@@ -328,7 +340,7 @@ ToolMessage **没有** `deerflow_tool_meta`（GuardrailMiddleware 不调 `normal
 ### 钩子与执行时机
 
 `wrap_tool_call` / `awrap_tool_call`，但**只对 `bash` 工具生效**，其余工具直接 `handler(request)` 透传。
-位于授权门（9）之内（先过身份授权再看命令内容），位于 ToolReceipt（13）之内（短路/重建结果由外层兜底记账）。
+位于授权门（11）之内（先过身份授权再看命令内容），位于 ToolReceipt（15）之内（短路/重建结果由外层兜底记账）。
 
 ### 命令位 vs 值位（本中间件的灵魂）
 
@@ -397,12 +409,12 @@ _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas
 
 ### 与邻居的关系
 
-- **对 ToolReceipt（13）**：block 短路消息与 warn 的**结果重建**都不会带内层 `deerflow_tool_meta`——
-  `_append_warn_to_result` 用 content/tool_call_id/name/status 构造**全新 ToolMessage**，丢弃了 ToolErrorHandling（13）
+- **对 ToolReceipt（15）**：block 短路消息与 warn 的**结果重建**都不会带内层 `deerflow_tool_meta`——
+  `_append_warn_to_result` 用 content/tool_call_id/name/status 构造**全新 ToolMessage**，丢弃了 ToolErrorHandling（15）
   刚 stamp 的 additional_kwargs。正因为 receipt 最外，这类结果仍记账（status 回退 `message.status`）；账本只在
   "短路发生在 receipt 之外"时才会漏——而那是被 ordering 约束禁止的；
-- **对授权门（9）**：审计在授权之后，先有身份结论再看命令内容，职责不重叠；
-- **对 ToolErrorHandling（13）**：block 是"决策"不是"故障"，由审计自己产出消息；warn 后真正执行的命令若抛异常，
+- **对授权门（11）**：审计在授权之后，先有身份结论再看命令内容，职责不重叠；
+- **对 ToolErrorHandling（15）**：block 是"决策"不是"故障"，由审计自己产出消息；warn 后真正执行的命令若抛异常，
   仍由内层 13 转成结构化错误。
 
 ### 设计权衡
@@ -426,7 +438,7 @@ _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas
 `wrap_tool_call`/`awrap_tool_call`）。
 ---
 
-## 4. ToolErrorHandlingMiddleware（第 13 位 · 与 ToolReceipt 同条目，最内层）
+## 4. ToolErrorHandlingMiddleware（第 15 位 · 与 ToolReceipt 同条目，最内层）
 
 ### 它解决什么问题
 
@@ -438,9 +450,9 @@ _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas
 
 ### 钩子与执行时机
 
-`wrap_tool_call` / `awrap_tool_call`，**链上最后一个中间件**（最内层，紧贴 ToolNode）。它看到的是**最原始**的
-handler 返回（还没被 ToolProgress/RBW 重写）；它 stamp 的 `deerflow_tool_meta` 先被 12 位 ToolProgress 读到
-（构建期由 ordering 约束保证），再被 13 位 ToolReceipt 用来生成凭证 status。
+`wrap_tool_call` / `awrap_tool_call`，**最内层 wrap_tool_call**（紧贴 ToolNode；其后还 append 一个位置无关的 `before_model` 捕获器 `ArtifactCaptureMiddleware` #16，不参与 wrap 栈）。它看到的是**最原始**的
+handler 返回（还没被 ToolProgress/RBW 重写）；它 stamp 的 `deerflow_tool_meta` 先被 14 位 ToolProgress 读到
+（构建期由 ordering 约束保证），再被 15 位 ToolReceipt 用来生成凭证 status。
 
 ### 内部实现逻辑
 
@@ -506,7 +518,7 @@ internal→(false, stop)；未知→(true, try_alternative)。**纯数字关键�
 
 ### 与邻居的关系
 
-- **向上游供应 meta**：ToolProgress（12）在 `_update_state_from_result` 读它判停滞；ToolReceipt（13）的
+- **向上游供应 meta**：ToolProgress（14）在 `_update_state_from_result` 读它判停滞；ToolReceipt（15）的
   `make_tool_receipt` 用 `meta.status` 作凭证状态（缺失才回退 `message.status`）；
 - **对短路消息**：Guardrail deny / SandboxAudit block 不经过本中间件，故不自 stamp meta——短路者是"决策者"，
   语义由 `message.status` 表达，外层的 receipt 用回退状态兜底（SandboxAudit 的 warn 重建甚至会丢弃本中间件已打的
@@ -531,7 +543,7 @@ internal→(false, stop)；未知→(true, try_alternative)。**纯数字关键�
 （`build_skill_entry_metadata_from_read`）；`subagents/status_contract.py`。
 ---
 
-## 5. ToolReceiptMiddleware（第 13 位 · 与 ToolErrorHandling 同条目，最外层 wrap_tool_call）
+## 5. ToolReceiptMiddleware（第 15 位 · 与 ToolErrorHandling 同条目，最外层 wrap_tool_call）
 
 ### 它解决什么问题
 
@@ -546,8 +558,8 @@ AI 报告的**引用必须落到真实执行过的证据上**（citation verific
 
 ### 钩子与执行时机
 
-- **`wrap_tool_call` / `awrap_tool_call`：shared base 里最外层**（AGENTS.md 第 13 位，先于 9~12 全部短路者）。注意它必须
-  **同时**包住 Guardrail/SandboxAudit/RBW/ToolProgress 四个可能短路或重建结果的中间件（ordering.py 逐条声明强校验）；
+- **`wrap_tool_call` / `awrap_tool_call`：shared base 里最外层**（AGENTS.md 第 15 位，先于 10~14 全部短路者）。注意它必须
+  **同时**包住 ArtifactResolution/Guardrail/SandboxAudit/RBW/ToolProgress 五个可能短路或重建结果的中间件（ordering.py 逐条声明强校验）；
 - **`wrap_model_call` / `awrap_model_call`**：每次模型调用前从在途消息提取凭证、渲染成隐藏 HumanMessage 注入
   （从不写回 state——与 DurableContextMiddleware 同构的派生数据）；模型响应返回后把"本次渲染的凭证子集"快照
   写回 AIMessage（`TOOL_RECEIPT_LEDGER_KEY`）。
@@ -610,13 +622,13 @@ not validate claim correctness"）——账本永远声明自己的证据边界�
 
 ### 与邻居的关系（为什么它必须是最外层）
 
-- **对短路者（9~12）**：Guardrail deny、SandboxAudit block/warn 重建、RBW blocked、ToolProgress BLOCK 都可能
+- **对短路者（10~14）**：Guardrail deny、SandboxAudit block/warn 重建、RBW blocked、ToolProgress BLOCK 都可能
   **不调用内层 handler** 就自行产出 ToolMessage。receipt 注册在它们内层时这些结果根本到不了 receipt——账本漏记；
   注册在外层则每条短路结果都被 `_stamp` 兜住（无 meta 回退 `message.status`），账本无空洞——这是 AGENTS.md 与
   ordering.py 反复强调的第一顺序契约；
-- **对 ToolErrorHandling（13）**：正常结果在内层返回路径上已 stamp meta，打凭证直接取 `meta.status`——凭证与停滞
+- **对 ToolErrorHandling（15）**：正常结果在内层返回路径上已 stamp meta，打凭证直接取 `meta.status`——凭证与停滞
   检测读的是**同一个**结构化信号；
-- **对 LLMErrorHandling（8）**：8 号是它模型调用侧的外层，重试会重新走 ledger 渲染（派生、幂等，无副作用）。
+- **对 LLMErrorHandling（9）**：9 号是它模型调用侧的外层，重试会重新走 ledger 渲染（派生、幂等，无副作用）。
 
 ### 设计权衡
 
@@ -633,20 +645,108 @@ not validate claim correctness"）——账本永远声明自己的证据边界�
 `_stamp_citing_ledger`）；`agents/middlewares/tool_receipt.py`（`make_tool_receipt`/`extract_tool_receipts`/
 `extract_citing_turn_receipts`/`is_valid_receipt`/`render_tool_receipts_with_snapshot`/`CITATION_RE`/`format_citation`/
 `parse_citations`）；`agents/middlewares/receipt_verification.py`（引用校验）；`extensions/ordering.py`（顺序契约）。
+
 ---
 
-## 6. 设计权衡速查表
+## 6. ArtifactResolutionMiddleware（第 10 位 · artifact 句柄在参数里解析）
+
+**源码**：`agents/middlewares/artifact_resolution_middleware.py`；配置 `config/tool_artifact_config.py`；
+契约见 [tool artifacts](TOOL_ARTIFACTS.md) 的 "Resolution" 段。
+
+### 它解决什么问题
+
+模型不直接持有文件路径 / URL / 任务 id，而是用短句柄 `art_xxxxxxxx` 引用先前工具产出的 artifact。工具执行**前**
+必须把这些句柄换成 `ThreadState.tool_artifacts` 里记录的真实引用（`real_ref`：路径、URL、任务 id），否则工具
+收到的是"句柄"而非真实目标——尤其对**按参数做决定的授权 / 审计 / 写门 / 进度**而言，看到句柄等于看不到真实
+动作对象（issue #4676）。
+
+### 钩子与执行时机
+
+- **`wrap_tool_call` / `awrap_tool_call`**：在调用内层 handler **之前**解析参数。装配为**收尾 receipt 层之内、
+  授权/审计/写门/进度之外**（ordering.py 强校验：`ArtifactResolution` 在 `Guardrail/SandboxAudit/ReadBeforeWrite/
+  ToolProgress` 之外），保证"解析后的参数"才是策略看到的参数——同一份已解析参数同时到达策略与执行。
+- **只改 request 参数，绝不改消息历史**：句柄可能裸写、包在反引号里、或嵌在更长的字符串 / dict / list 里
+  （`_HANDLE_PATTERN`）。**未知或过期句柄**返回 `status="error"` 的 ToolMessage（命名缺失句柄并列出至多十个当前
+  句柄），**不执行工具**——空注册表也一样。
+- 装配条件：`tool_artifacts.enabled` **且** `tool_artifacts.resolve_handles_in_args`（默认开）；两个都必须开——
+  关掉 `enabled` 会连同仍带注册表状态的线程一起停止解析。普通具体参数与关闭特性时行为不变。
+- task-note 批次预留从调用本地 `ToolRuntime.state` 读同一解析器的参数视图（`RESOLVED_TOOL_CALL_ARGS_KEY`，
+  `deerflow.agents.task_continuity.state`）；别名按解析后的 key 共享槽位。
+
+### 与邻居的关系
+
+- **外层是 ToolReceipt（15）**：解析失败产出的 error ToolMessage 也进账本；**内层是授权/审计/写门/进度**——
+  它们按参数决策，必须在句柄已解析之后跑。
+- 兄弟是 **ArtifactCapture（16）**：捕获把句柄写进 state，解析把 state 里的句柄换回真实引用——一写一读。
+- 它**不是安全边界**：`art_` 短哈希只是标识符、不是所有权凭据。
+
+### 源码阅读指引
+
+`artifact_resolution_middleware.py`：`_HANDLE_PATTERN`（裸/反引号/嵌入）→ `_resolve_request`（扫描并替换参数）→
+`wrap_tool_call`（未知句柄短路）。契约与委派范围见 [tool artifacts](TOOL_ARTIFACTS.md)。
+
+---
+
+## 7. ArtifactCaptureMiddleware（第 16 位 · 从结果捕获 artifact 引用）
+
+**源码**：`agents/middlewares/artifact_capture_middleware.py`；配置 `config/tool_artifact_config.py`；
+契约见 [tool artifacts](TOOL_ARTIFACTS.md) 的 "Capture" 段。
+
+### 它解决什么问题
+
+工具结果里会带文件 / URL / 任务引用（结构化 content 的已知键、`file`/`image` 内容块、以及沙箱文本输出里的
+路径 / URL）。这些引用要以**轻量元数据**（handle + path/name/type/MIME）持久进 `ThreadState.tool_artifacts`，
+才能在压缩后仍被模型用短句柄引用；同时要跟踪哪些句柄已被后续调用**消费**，好在投影里标 `[consumed]`。
+
+### 钩子与执行时机
+
+- **`before_model`（不是 `wrap_tool_call`）**：读 state 消息，所以**在工具执行 wrap 链里的位置在功能上无关**——
+  它总能看到 state 里已归一化的结果；error 结果（`status == "error"`）在提取时跳过。装配上仅**为可读性**排在
+  ToolErrorHandling（15）之后。
+- 装配条件：`tool_artifacts.enabled`（默认开）；关掉时 `before_model` 直接返回空，无论注册表状态。
+
+### 内部实现逻辑要点
+
+- **句柄确定性派生**：`art_` + 8 hex，来自 `(thread_id, 持久化 ToolMessage.id, provider tool_call_id, 每条结果
+  序数)`——provider call id 跨轮可能重复，图分配的 message id 区分出现并**跨压缩保持稳定**。
+- **处理去重账本**：`ThreadState.tool_artifact_processed` 用加法 reducer 存"已处理结果 / 已结算消费调用"的去重
+  哈希；它**独立于注册表保留**、跨 checkpoint 重载 / 图重建 / 压缩存活，**不能换成进程内 memo**（空结果也记）。
+- **消费重试一次**：缺失句柄的消费调用在结算前给一次重试，所以永久未知 / 被逐出的句柄**至多扫两次**（含跨重启）。
+- **边界与上限**：结构化遍历先做节点/层级边界，JSON 兼容回退仅在 ≤4096 UTF-8 字节内、空与超大载荷在无界序列化
+  前跳过；reducer 只强制绝对上限（1000），配置的 `max_entries` 是每个 agent 的滑动保留窗口（超出时追加
+  `{"op":"trim_to","keep":N}` 指令，**新捕获始终登记**）。只捕获轻量元数据，第 2 位 ToolOutputBudget 截断
+  content 不影响它。
+
+### 与邻居的关系
+
+- **与 ArtifactResolution（10）配对**：捕获写 state，解析读 state。
+- **DurableContext（20）投影**：`tool_artifacts.enabled` 且 `inject_model_context` 开时，句柄随工作笔记/摘要进隐藏
+  HumanMessage 数据块（每个模型可见标签先过配置的 PII 策略再 HTML 转义；内部 `real_ref` 不变，句柄仍可用）。
+- **委派范围（MVP）**：注册表与处理账本都是 agent-local——`SubagentExecutor._build_initial_state` 不复制这两个
+  通道，子代理必须在报告里回具体引用；子代理本地句柄回灌给 lead 会在解析期被拒绝。
+
+### 源码阅读指引
+
+`artifact_capture_middleware.py`：`before_model`（捕获 + 消费跟踪 + 合并更新）→ `_capture`/`_track_consumption`；
+提取器在 `tools/artifact_registry.py::extract_artifacts_from_result`；reducer 与 `ArtifactEntry` 在
+`agents/thread_state.py`。契约见 [tool artifacts](TOOL_ARTIFACTS.md)。
+
+---
+
+## 8. 设计权衡速查表
 | 中间件 | 链位 | 核心权衡 | 边界声明 |
 |---|---|---|---|
-| LLMErrorHandling | 8 | 去相关抖动 vs 同步再峰；熔断只记真故障 | 让 run 以可解释失败收尾，不吞控制流 |
-| GuardrailMiddleware | 9 | fail-closed（默认）vs fail-open；授权先于外部 guardrail | 只拦"执行前"；工具装配过滤归 Layer 1 |
-| SandboxAudit | 10 | block/warn/pass 三级 vs 二值；命令位/值位按位置判 | **纵深防御与审计，不是安全边界**（沙箱才是） |
-| ToolErrorHandling | 13（最内） | 异常分类覆盖正常；关键词表宁宽勿杀 | 异常 ≠ run 中止，统一成结构化 meta |
-| ToolReceipt | 13（最外） | 账本 token 税 vs 可核验证据；派生不持久化 | 记录"发生过+状态"，不背书"做对了" |
+| LLMErrorHandling | 9 | 去相关抖动 vs 同步再峰；熔断只记真故障 | 让 run 以可解释失败收尾，不吞控制流 |
+| ArtifactResolution | 10 | 解析参数句柄 vs 未知/过期即不执行 | 句柄是标识符，不是所有权凭据 |
+| GuardrailMiddleware | 11 | fail-closed（默认）vs fail-open；授权先于外部 guardrail | 只拦"执行前"；工具装配过滤归 Layer 1 |
+| SandboxAudit | 12 | block/warn/pass 三级 vs 二值；命令位/值位按位置判 | **纵深防御与审计，不是安全边界**（沙箱才是） |
+| ToolErrorHandling | 15（最内） | 异常分类覆盖正常；关键词表宁宽勿杀 | 异常 ≠ run 中止，统一成结构化 meta |
+| ToolReceipt | 15（最外） | 账本 token 税 vs 可核验证据；派生不持久化 | 记录"发生过+状态"，不背书"做对了" |
+| ArtifactCapture | 16 | 轻量引用捕获 vs 注册表体积 | `before_model` 位置无关；agent-local MVP |
 
-## 7. 阅读顺序与延伸
+## 9. 阅读顺序与延伸
 
-1. 先读 `agents/middlewares/AGENTS.md` "Middleware Chain" 全文（本组对应 8~13 条目）；
+1. 先读 `agents/middlewares/AGENTS.md` "Middleware Chain" 全文（本组对应 9~16 条目）；
 2. 装配实证：`agents/middlewares/tool_error_handling_middleware.py::_build_runtime_middlewares` 的 tail 追加段（本文 §0 下标即出自此处）；
 3. 顺序契约：`extensions/ordering.py` + `extensions/stack.py::compose_with_extensions`（扩展注入后校验、指认责任方）；
 4. 机制背景 issue/设计：SandboxAudit `#4611`、LLM 熔断 `#4290`、错误页 `#4273`、授权 RFC `docs/plans/2026-07-10-pluggable-authorization-rfc.md`；
