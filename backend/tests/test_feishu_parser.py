@@ -190,6 +190,23 @@ def test_feishu_stop_joins_ws_thread_off_the_event_loop():
     asyncio.run(go())
 
 
+def test_feishu_stop_retains_live_ws_thread_after_join_timeout():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        channel._thread = thread
+        channel._running = True
+
+        with pytest.raises(RuntimeError, match="still running after stop timeout"):
+            await channel.stop()
+
+        thread.join.assert_called_once_with(timeout=5)
+        assert channel._thread is thread
+
+    asyncio.run(go())
+
+
 def test_feishu_event_handler_ignores_non_content_message_events():
     import lark_oapi as lark
 
@@ -410,12 +427,12 @@ def test_feishu_receive_file_path_traversal_failure_is_per_attachment(tmp_path, 
         real_write = feishu_module.write_upload_file_no_symlink
         call_count = 0
 
-        def flaky_write(base_dir, filename, data):
+        def flaky_write(base_dir, filename, data, *, exclusive=False):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise PathTraversalError("Path traversal detected")
-            return real_write(base_dir, filename, data)
+            return real_write(base_dir, filename, data, exclusive=exclusive)
 
         monkeypatch.setattr(feishu_module, "write_upload_file_no_symlink", flaky_write)
         msg = InboundMessage(
