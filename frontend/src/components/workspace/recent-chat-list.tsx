@@ -56,6 +56,7 @@ import { useLocalSettings } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import {
+  fetchThreadExportMessages,
   useInfiniteThreads,
   useMoveThreadToProject,
   usePinThread,
@@ -137,6 +138,7 @@ export function ThreadSidebarItem({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const handleRenameSubmit = useCallback(() => {
     if (renameValue.trim()) {
@@ -176,14 +178,10 @@ export function ThreadSidebarItem({
   }, [t.chats.pinChatFailed, thread, updatePinnedThread]);
 
   const handleShare = useCallback(async () => {
-    // Always use Vercel URL for sharing so others can access
-    const VERCEL_URL = "https://deer-flow-v2.vercel.app";
-    const isLocalhost =
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1";
-    // On localhost: use Vercel URL; On production: use current origin
-    const baseUrl = isLocalhost ? VERCEL_URL : window.location.origin;
-    const shareUrl = `${baseUrl}${pathOfThread(thread)}`;
+    // Link to this deployment, the only place the thread exists. Never
+    // rewrite the origin to another host: the thread id would leave the
+    // deployment and the link would not open the thread.
+    const shareUrl = `${window.location.origin}${pathOfThread(thread)}`;
     try {
       const didCopy = await writeTextToClipboard(shareUrl);
       if (!didCopy) {
@@ -199,20 +197,26 @@ export function ThreadSidebarItem({
 
   const handleExport = useCallback(
     async (format: ThreadExportFormat) => {
+      setExporting(true);
       try {
-        const apiClient = getAPIClient();
-        const state = await apiClient.threads.getState<AgentThreadState>(
-          thread.thread_id,
-        );
-        const messages = state.values?.messages ?? [];
+        const messages = isStaticWebsiteOnly()
+          ? ((
+              await getAPIClient().threads.getState<AgentThreadState>(
+                thread.thread_id,
+              )
+            ).values?.messages ?? [])
+          : await fetchThreadExportMessages(thread.thread_id);
         if (messages.length === 0) {
           toast.error(t.conversation.noMessages);
           return;
         }
         exportThread(thread, messages, format);
         toast.success(t.common.exportSuccess);
-      } catch {
+      } catch (error) {
+        console.error(error);
         toast.error(t.common.exportFailed);
+      } finally {
+        setExporting(false);
       }
     },
     [t, thread],
@@ -326,7 +330,7 @@ export function ThreadSidebarItem({
               <span>{t.common.share}</span>
             </DropdownMenuItem>
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger disabled={exporting}>
                 <Download className="text-muted-foreground" />
                 <span>{t.common.export}</span>
               </DropdownMenuSubTrigger>

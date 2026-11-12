@@ -1,6 +1,57 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  usage: {
+    title: string;
+    description: string;
+    reportingNote: string;
+    period: string;
+    last7Days: string;
+    last30Days: string;
+    refresh: string;
+    tokens: string;
+    runs: string;
+    inputTokens: string;
+    outputTokens: string;
+    cachedTokens: string;
+    daily: string;
+    dailyDetails: string;
+    models: string;
+    noUsage: string;
+    unknown: string;
+    timezoneNote: string;
+    date: string;
+    model: string;
+    noModels: string;
+    noRuns: string;
+    recentRuns: string;
+    recentRunsHint: string;
+    status: string;
+    allStatuses: string;
+    pending: string;
+    running: string;
+    success: string;
+    error: string;
+    timeout: string;
+    interrupted: string;
+    cancelled: string;
+    unknownStatus: string;
+    previous: string;
+    next: string;
+    page: (page: number) => string;
+    started: string;
+    duration: string;
+    conversation: string;
+    untitled: string;
+    details: string;
+    loadFailed: string;
+    retry: string;
+    forbidden: string;
+    unavailable: string;
+    databaseRequired: string;
+    staticUnavailable: string;
+    loading: string;
+  };
   // Locale meta
   locale: {
     localName: string;
@@ -26,14 +77,48 @@ export interface Translations {
     catalogEntry: string;
     catalogHint: string;
     installationGuide: string;
+    detail: {
+      guide: string;
+      gettingStarted: string;
+      requirements: string;
+      loaded: string;
+      loadedHint: string;
+      tools: string;
+      pages: string;
+      management: string;
+      readyHint: string;
+      disabledHint: string;
+      failedHint: string;
+      noPageHint: string;
+      guideHint: string;
+      technicalDetails: string;
+      package: string;
+      namespace: string;
+      refresh: string;
+      refreshHint: string;
+    };
     catalog: Record<
+      | "workflows"
+      | "reportSections"
       | "agentTeams"
       | "bookmarks"
       | "context"
       | "classify"
       | "screening"
+      | "retrieval"
+      | "knowledge"
+      | "knowledgeManagement"
+      | "knowledgePlatform"
+      | "knowledgeCenter"
+      | "weknora"
+      | "lightrag"
       | "example",
-      { title: string; description: string }
+      {
+        title: string;
+        description: string;
+        gettingStarted?: { title: string; description: string }[];
+        requirements?: string[];
+      }
     >;
     pageUnavailable: string;
     pageUnavailableHint: string;
@@ -172,6 +257,13 @@ export interface Translations {
     showBrowser: string;
   };
 
+  browserStream: {
+    connecting: string;
+    disconnected: string;
+    handshakeTimeout: string;
+    connectionFailed: string;
+  };
+
   skillUsage: {
     used: string;
     title: string;
@@ -200,6 +292,11 @@ export interface Translations {
   home: {
     docs: string;
     blog: string;
+    searchDocs: string;
+    searchDocsLabel: string;
+    searchNoResults: string;
+    searchLoadFailed: string;
+    searchLoading: string;
   };
 
   // Welcome
@@ -232,6 +329,8 @@ export interface Translations {
   };
 
   artifactPreview: {
+    loadingPreview: string;
+    resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
     loadFullFile: string;
     loadingFullFile: string;
@@ -268,6 +367,12 @@ export interface Translations {
   };
 
   modelPicker: {
+    search: string;
+    provider: string;
+    allProviders: string;
+    noResults: string;
+    recent: string;
+
     title: string;
     favorites: string;
     otherModels: string;
@@ -411,6 +516,7 @@ export interface Translations {
       waitingForYou: string;
       waiting: string;
       paused: string;
+      waitingApproval: string;
       autoContinuedOnce: string;
       autoContinuedMany: string;
       details: string;
@@ -426,10 +532,14 @@ export interface Translations {
         autoOff: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
+        recursionCapped: string;
         missingEvidence: string;
         runFailed: string;
         needsInputCard: string;
         needsInputReply: string;
+        needsApproval: string;
+        needsApprovalReload: string;
         external: string;
         unchecked: string;
         unknown: string;
@@ -461,6 +571,22 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    runInputMode: string;
+    queueMode: string;
+    steerMode: string;
+    queueModeHelp: string;
+    steerModeHelp: string;
+    runInputSend: string;
+    runInputTextOnly: string;
+    runInputUnavailable: string;
+    stopRun: string;
+    runInputQueued: string;
+    runInputSteering: string;
+    runInputUnapplied: string;
+    runInputRetry: string;
+    runInputCancel: string;
+    runInputDispatching: string;
+    runInputReplayUnavailable: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
   };
@@ -550,7 +676,15 @@ export interface Translations {
     viewTrash: string;
     documentsLoadFailed: string;
     threadFilesLoadFailed: string;
-    interimMemoryNotice: string;
+    memoryTitle: string;
+    memoryAutoExtract: string;
+    memoryDescription: string;
+    memoryEmpty: string;
+    memoryPromote: string;
+    memoryPromoted: string;
+    memorySaveFirst: string;
+    memoryLoadFailed: string;
+    memoryActionFailed: string;
   };
 
   // Trash view (Projects Phase 2)
@@ -655,6 +789,8 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    followUpPending: string;
+    followUpStopped: string;
     workerUnavailable: string;
     empty: string;
     emptyHint: string;
@@ -666,6 +802,18 @@ export interface Translations {
     cancel: string;
     retryItem: string;
     exportResults: string;
+    viewResult: string;
+    resultTitle: string;
+    resultDescription: string;
+    report: string;
+    evidence: string;
+    noEvidence: string;
+    acceptance: string;
+    noReport: string;
+    loadResultFailed: string;
+    truncated: string;
+    omittedEvidence: (count: number) => string;
+    pagesLabel: string;
     viewItems: string;
     hideItems: string;
     itemsFailed: string;
@@ -835,6 +983,37 @@ export interface Translations {
       removeCapBlocked: string;
       submit: string;
     };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      bindWecom: string;
+      bindQq: string;
+      name: string;
+      nameHint: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
     form: {
       createTitle: string;
       editTitle: string;
@@ -959,6 +1138,8 @@ export interface Translations {
         maxContinuations: string;
         noProgress: string;
         tokenCapped: string;
+        loopCapped: string;
+        recursionCapped: string;
         evaluatorFailed: string;
         noDurableEndOfTurn: string;
         threadChanged: string;
@@ -995,6 +1176,7 @@ export interface Translations {
       invalidGoal: string;
       goalRequiresFreshThread: string;
       invalidStopCondition: string;
+      invalidNotificationGroup: string;
       invalidMaxRuns: string;
       endAtInPast: string;
       endAtBeforeFirstRun: string;
@@ -1109,6 +1291,7 @@ export interface Translations {
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;
@@ -1119,12 +1302,22 @@ export interface Translations {
     settingsDisplayName: string;
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
     settingsDescription: string;
     settingsKnowledge: string;
     settingsKnowledgeHint: string;
     settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
+    settingsModelSwitchNeedsCatalog: string;
+    settingsReasoningUnsupported: string;
+    settingsThinkingRequiredHint: string;
+    settingsReasoningUnsupportedHint: string;
     settingsTemperature: string;
     settingsTemperatureHint: string;
     settingsMaxTokens: string;
@@ -1169,6 +1362,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;
   };
@@ -1331,6 +1525,23 @@ export interface Translations {
       confirmed: string;
       retry: string;
     };
+    /** The `/connect <code>` dialog for apps linked by messaging their bot. */
+    bindingCode: {
+      description: (provider: string) => string;
+      loading: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      expiresAt: (time: string) => string;
+      waiting: (provider: string) => string;
+      connected: (provider: string) => string;
+      done: string;
+      expired: string;
+      newCode: string;
+      failed: string;
+      tooManyCodes: string;
+      retry: string;
+    };
     saveAndConnect: string;
     saveChanges: string;
     descriptions: Record<string, string>;
@@ -1354,6 +1565,9 @@ export interface Translations {
   // Tool calls
   toolCalls: {
     details: string;
+    failed: string;
+    scheduleTaskPending: string;
+    stopScheduledTaskPending: string;
     toolName: string;
     callId: string;
     input: string;
@@ -1414,6 +1628,40 @@ export interface Translations {
     requiredA11yLabel: string;
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
+    approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
+      title: string;
+      description: string;
+      waiting: string;
+      loading: string;
+      loadFailed: string;
+      reload: string;
+      approve: string;
+      reject: string;
+      approveAll: string;
+      rejectAll: string;
+      submitDecisions: string;
+      reasonLabel: string;
+      reasonPlaceholder: string;
+      submitFailed: string;
+      submitTimeout: string;
+      featureDisabled: string;
+      noPending: string;
+    };
   };
 
   // Uploads
@@ -1495,6 +1743,30 @@ export interface Translations {
     title: string;
     description: string;
     models: {
+      connectionSettings: string;
+      importTitle: string;
+      importDescription: string;
+      savedConnection: string;
+      newConnection: string;
+      fetchModels: string;
+      searchModels: string;
+      selectVisible: string;
+      clearSelection: string;
+      alreadyConfigured: string;
+      noCatalogResults: string;
+      catalogTruncated: string;
+      discovery_unsupported: string;
+      discovery_failed: string;
+      importUncertain: string;
+      importStopped: string;
+      stopImport: string;
+      closeCatalog: string;
+      catalogCount: (
+        visible: number,
+        total: number,
+        selected: number,
+      ) => string;
+      testAndAdd: (count: number) => string;
       title: string;
       description: string;
       adminOnly: string;
@@ -1530,9 +1802,39 @@ export interface Translations {
       success: string;
       tool_call_missing: string;
       connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
+    };
+    users: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      email: string;
+      role: string;
+      status: string;
+      active: string;
+      disabled: string;
+      disable: string;
+      enable: string;
+      updateFailed: string;
     };
     sections: {
       models: string;
+      users: string;
       account: string;
       appearance: string;
       channels: string;
@@ -1806,6 +2108,14 @@ export interface Translations {
       };
     };
     skills: {
+      diagnosticsTitle: string;
+      diagnosticsScope: string;
+      diagnosticsInvalid: string;
+      diagnosticsQuote: string;
+      diagnosticsRefresh: string;
+      diagnosticsRefreshing: string;
+      diagnosticsFailed: string;
+      diagnosticsReloadFailed: string;
       exportPrevious: string;
       exportNotices: Record<string, string>;
       exportSkill: string;
@@ -1861,6 +2171,32 @@ export interface Translations {
       testBody: string;
       notSupported: string;
       disableNotification: string;
+      channels: {
+        title: string;
+        description: string;
+        providers: {
+          feishu: string;
+          wecom: string;
+          wechat: string;
+          qq: string;
+        };
+        toggleLabel: (provider: string) => string;
+        eventsTitle: string;
+        eventsDescription: string;
+        events: {
+          run_completed: string;
+          run_failed: string;
+          human_input_requested: string;
+        };
+        eventToggleLabel: (event: string) => string;
+        loading: string;
+        saving: string;
+        loadFailed: string;
+        saveFailed: string;
+        unavailable: string;
+        empty: string;
+        retry: string;
+      };
     };
     account: {
       profileTitle: string;
@@ -1920,6 +2256,10 @@ export interface Translations {
       sso_cancelled: string;
       sso_account_exists: string;
       sso_not_allowed: string;
+      account_disabled: string;
+      invalid_email: string;
+      password_too_short: string;
+      registration_password_too_short: string;
     };
   };
 }

@@ -51,11 +51,14 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    version, creates the missing `.env` files, and exports `DEER_FLOW_ROOT`.
 
    If you do run Compose directly, run it **from the repository root** and set
-   `DEER_FLOW_ROOT` to the absolute path of your checkout. Compose interpolates
-   that variable into host-side paths (`DEER_FLOW_HOST_BASE_DIR`,
-   `THREADS_HOST_PATH`) that the AIO and provisioner sandbox modes bind-mount;
-   leaving it unset renders them as `/backend/.deer-flow`, so those mounts
-   silently miss your checkout instead of failing:
+   `DEER_FLOW_ROOT` to the absolute path of your checkout. The default command
+   starts the local/AIO development stack without Kubernetes; add
+   `--profile provisioner` only when you need provisioner/Kubernetes sandbox
+   mode. Compose interpolates `DEER_FLOW_ROOT` into host-side paths
+   (`DEER_FLOW_HOST_BASE_DIR`, `THREADS_HOST_PATH`) that the AIO and provisioner
+   sandbox modes bind-mount; leaving it unset renders them as
+   `/backend/.deer-flow`, so those mounts silently miss your checkout instead of
+   failing:
 
    ```bash
    # macOS / Linux
@@ -104,6 +107,8 @@ If Docker builds are slow in your network, you can override the default package 
 export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
+
+Keep `UV_INDEX_URL` at `https://pypi.org/simple`: the gateway image installs with `uv sync --locked`, and `uv.lock` is locked to that index, so a mirror makes the build fail with ``The lockfile at `uv.lock` needs to be updated, but `--locked` was provided``.
 
 #### Recommended host resources
 
@@ -333,6 +338,10 @@ before review.
 ## Testing
 
 ```bash
+# Public skill scripts (from the repository root)
+python -m pip install -r tests/skills/requirements.txt
+python -m pytest tests/skills -q
+
 # Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test
@@ -356,6 +365,11 @@ cd frontend
 make test-e2e
 ```
 
+If a host-configured uv package mirror blocks dependencies while running the
+config upgrade tests, run `make test-config-version` from the repository root.
+That command uses public PyPI for this suite and its subprocesses without
+changing the host's uv settings or the normal config upgrade command.
+
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend
 test command or CI. Direct pytest invocations of `tests/test_client_live.py`
@@ -368,6 +382,32 @@ Every pull request triggers the following CI workflows:
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+### Test and diagnostics notes
+
+Backend `make test` runs four duration-balanced shards concurrently and reports
+failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
+It excludes live external-API and blocking-I/O coverage.
+Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
+Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
+This command requires a valid root `config.yaml` and API credentials.
+It can incur API costs and create local sandboxes, artifacts, or files.
+Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+Backend blocking-IO diagnostics are available from the repository root with
+`make detect-blocking-io`: it statically scans backend business code for
+blocking IO that may run on the backend event loop, prints a concise summary,
+and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
+The JSON includes compact review records with `priority`, `location`,
+`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
+Gateway artifact serving now forces active web content types (`text/html` and XML documents such as `.xml`, `.xhtml`, and `.svg`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+Frontend route asset budgets can be checked with `cd frontend && pnpm
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
 
 ## Code Style
 

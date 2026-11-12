@@ -9,9 +9,64 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
+  usage: {
+    title: "Token 用量",
+    description: "查看输入、输出及缓存命中 Token 用量。",
+    reportingNote:
+      "统计来自已记录的服务商用量；运行中或服务商未返回用量时可能不完整。缓存命中已包含在输入 Token 中。",
+    period: "统计周期",
+    last7Days: "近 7 天",
+    last30Days: "近 30 天",
+    refresh: "刷新",
+    tokens: "Token 总量",
+    runs: "运行次数",
+    inputTokens: "输入 Token",
+    outputTokens: "输出 Token",
+    cachedTokens: "缓存命中输入 Token",
+    daily: "每日 Token 用量",
+    dailyDetails: "查看每日明细",
+    models: "模型用量分布",
+    noUsage: "此周期内暂无用量记录。",
+    unknown: "未知",
+    timezoneNote: "每日统计使用浏览器当前的 UTC 时区偏移。",
+    date: "日期",
+    model: "模型",
+    noModels: "此周期内暂无模型用量记录。",
+    noRuns: "没有符合筛选条件的运行。",
+    recentRuns: "最近运行",
+    recentRunsHint: "包含所有日期，按最新时间排序，不受上方统计周期限制。",
+    status: "运行状态",
+    allStatuses: "全部状态",
+    pending: "排队中",
+    running: "运行中",
+    success: "已完成",
+    error: "失败",
+    timeout: "超时",
+    interrupted: "已中断",
+    cancelled: "已取消",
+    unknownStatus: "其他状态",
+    previous: "上一页",
+    next: "下一页",
+    page: (page) => `第 ${page} 页`,
+    started: "开始时间",
+    duration: "耗时",
+    conversation: "会话",
+    untitled: "未命名会话",
+    details: "错误详情",
+    loadFailed: "用量数据加载失败，请重试。",
+    retry: "重试",
+    forbidden: "你没有查看用量与运行记录的权限。",
+    unavailable: "当前服务器暂不支持用量统计。",
+    databaseRequired:
+      "用量统计暂不可用，需要 SQLite 或 PostgreSQL 数据库。如问题持续，请联系管理员。",
+    staticUnavailable: "静态演示模式不提供用量统计。",
+    loading: "正在加载用量…",
+  },
   // Locale meta
   locale: {
     localName: "中文",
@@ -39,33 +94,55 @@ export const zhCN: Translations = {
     catalogHint:
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
+    detail: {
+      guide: "阅读使用说明",
+      gettingStarted: "开始使用",
+      requirements: "使用前准备",
+      loaded: "已加载",
+      loadedHint: "此扩展已加载，使用方式见本页说明。",
+      tools: "已注册工具",
+      pages: "工作区入口",
+      management: "使用与管理",
+      readyHint: "此扩展已由管理员启用，可以直接使用。",
+      disabledHint: "此扩展已停用。请联系管理员启用后再使用。",
+      failedHint: "扩展页面未能加载，请刷新扩展后重试。",
+      noPageHint:
+        "此扩展没有独立工作页面。请查看使用说明，了解它在对话或任务中的使用方式。",
+      guideHint: "通过使用说明，了解此扩展提供的功能和使用方式。",
+      technicalDetails: "技术信息",
+      package: "安装包",
+      namespace: "扩展标识",
+      refresh: "刷新扩展",
+      refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
+    },
     catalog: {
-      agentTeams: {
-        title: "Agent 团队",
-        description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
-      },
-      bookmarks: {
-        title: "会话书签",
-        description: "收藏有用的回答，在独立页面查找与整理自己的书签。",
-      },
-      context: {
-        title: "上下文裁剪",
-        description: "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
-      },
-      classify: {
-        title: "文本分类",
-        description: "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
-      },
-      screening: {
-        title: "内容风险提示",
-        description:
-          "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
-      },
-      example: {
-        title: "扩展开发示例",
-        description:
-          "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
+      context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "zh-CN"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "zh-CN"),
+      workflows: bundledCopy("deerflow-extension-workflows", "zh-CN"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "zh-CN",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "zh-CN"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "zh-CN"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "zh-CN",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "zh-CN",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "zh-CN",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
+      weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
+      example: bundledCopy("deerflow-extension-example", "zh-CN"),
     },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
@@ -210,6 +287,15 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  browserStream: {
+    connecting: "正在连接…",
+    disconnected: "连接已断开",
+    handshakeTimeout:
+      "实时浏览器连接超时。请检查网络或代理设置，然后关闭并重新开启 Live 以重试。",
+    connectionFailed:
+      "实时浏览器连接失败或已关闭。请检查网络连接和访问权限，然后关闭并重新开启 Live 以重试。",
+  },
+
   skillUsage: {
     used: "使用的技能",
     title: "技能",
@@ -239,6 +325,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -274,6 +365,9 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "正在准备预览...",
+    resourcesUnavailable:
+      "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
@@ -315,6 +409,12 @@ export const zhCN: Translations = {
   },
 
   modelPicker: {
+    search: "搜索模型名称或 ID…",
+    provider: "渠道",
+    allProviders: "全部渠道",
+    noResults: "没有匹配的模型",
+    recent: "最近使用",
+
     title: "选择模型",
     favorites: "收藏",
     otherModels: "其他模型",
@@ -467,6 +567,7 @@ export const zhCN: Translations = {
       waitingForYou: "等你回复",
       waiting: "等待中",
       paused: "已暂停",
+      waitingApproval: "等待审批",
       autoContinuedOnce: "自动续跑了 1 次",
       autoContinuedMany: "自动续跑了 {count} 次",
       details: "详情",
@@ -486,12 +587,19 @@ export const zhCN: Translations = {
           "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
         tokenCapped:
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        loopCapped:
+          "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
+        recursionCapped:
+          "运行达到了步数上限，未能完成。发送新消息即可继续，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
           "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
         needsInputCard: "回答上面的问题即可继续。",
         needsInputReply: "回复补充缺少的信息即可继续。",
+        needsApproval: "查看并处理上面的工具审批即可继续。",
+        needsApprovalReload:
+          "审批详情加载失败，请使用上方的重新加载错误面板重试。",
         external: "目标检查：正在等待外部条件，就绪后发送消息即可继续。",
         unchecked: "{reason}。下次发消息后会重新检查。",
         unknown: "发送消息即可继续。",
@@ -557,6 +665,25 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    runInputMode: "运行中发送方式",
+    queueMode: "排队执行",
+    steerMode: "调整当前任务",
+    queueModeHelp: "当前任务结束后再执行",
+    steerModeHelp: "在下一处可处理的位置调整当前任务",
+    runInputSend: "发送补充消息",
+    runInputTextOnly:
+      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputUnavailable:
+      "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
+    stopRun: "停止当前任务",
+    runInputQueued: "排队中",
+    runInputSteering: "等待加入当前任务",
+    runInputUnapplied: "本轮未确认生效",
+    runInputRetry: "重新发送",
+    runInputCancel: "移除这条消息",
+    runInputDispatching: "待确认",
+    runInputReplayUnavailable:
+      "这轮任务中途调整过，请发送新消息继续，暂不支持只重放其中一段。",
     stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
     startTurnUnavailable: "你的角色无权开启新的回合。",
   },
@@ -680,8 +807,16 @@ export const zhCN: Translations = {
     viewTrash: "回收站",
     documentsLoadFailed: "无法加载项目文档",
     threadFilesLoadFailed: "无法加载对话文件",
-    interimMemoryNotice:
-      "记忆目前仍为全局：在第三阶段之前，项目中讨论的内容仍可能进入你的全局记忆。",
+    memoryTitle: "项目记忆",
+    memoryAutoExtract: "自动提取",
+    memoryDescription:
+      "从项目对话中提炼长期有效的事实，仅用于本项目。关闭自动提取会保留已有记忆；不再需要的内容可直接删除。自动提取需开启全局记忆功能。",
+    memoryEmpty: "还没有项目记忆。项目对话中形成的约定和经验会显示在这里。",
+    memoryPromote: "转入指令",
+    memoryPromoted: "已转入项目指令",
+    memorySaveFirst: "请先保存上方的指令修改，再转入记忆。",
+    memoryLoadFailed: "无法加载项目记忆。",
+    memoryActionFailed: "项目记忆更新失败，请刷新后重试。",
   },
 
   trash: {
@@ -755,7 +890,9 @@ export const zhCN: Translations = {
   subagentBatches: {
     label: "批处理",
     title: "子智能体批处理",
-    description: "面向大量独立条目的持久化、可恢复执行。",
+    description: "在后台执行并保留进度的批量任务。",
+    followUpPending: "这批任务结束后，会继续完成你要求的后续工作。",
+    followUpStopped: "已停止自动接续。",
     workerUnavailable:
       "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
     empty: "暂无子智能体批处理",
@@ -768,6 +905,18 @@ export const zhCN: Translations = {
     cancel: "取消",
     retryItem: "重试",
     exportResults: "导出 JSONL",
+    viewResult: "查看结果",
+    resultTitle: "批处理结果",
+    resultDescription: "查看该条目的持久化报告和已捕获证据。",
+    report: "报告",
+    evidence: "已捕获证据",
+    noEvidence: "没有已捕获证据",
+    acceptance: "验收结果",
+    noReport: "该条目还没有保存报告。",
+    loadResultFailed: "无法加载批处理结果",
+    truncated: "报告已截断",
+    omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",
@@ -956,6 +1105,40 @@ export const zhCN: Translations = {
         "在对话中创建、且比每小时更频繁的任务需要设置保险上限。",
       submit: "恢复",
     },
+    notificationGroup: {
+      savedUnavailable: "已有群通知配置，当前服务未启用群通知。",
+      clearSaved: "清除群通知",
+      bind: "绑定飞书群",
+      bindWecom: "绑定企业微信群",
+      bindQq: "绑定 QQ 群",
+      name: "群名称",
+      nameHint:
+        "为这个群取一个容易识别的名称，便于选择通知目标。重新绑定可修改群名称。",
+      refresh: "刷新群列表",
+      bindInstructions:
+        "先把机器人加入群聊，再在群里 @机器人 并发送这条命令。完成绑定后刷新群列表。",
+      generating: "正在生成绑定码…",
+      bindFailed: "无法生成绑定码，请重试。",
+      command: "群绑定命令",
+      expiresAt: "有效期至 {time}。",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      newCode: "生成新绑定码",
+      close: "关闭绑定说明",
+      label: "额外通知到群聊（可选）",
+      detailLabel: "额外通知到群聊",
+      none: "仅通知本人",
+      personalHint: "你现有的个人通知保持不变，所选群也会收到任务更新。",
+      emptyHint: "先在下方绑定群聊，再刷新群列表。",
+      loading: "正在加载群列表…",
+      unavailable: "已选群暂不可用",
+      unavailableHint: "已选群当前不可用。可以保留、移除或选择其他群。",
+      unnamed: "群名称不可用",
+      unnamedHint: "请重新绑定该群并设置容易识别的名称，再选择通知目标。",
+      loadFailed:
+        "无法加载群列表，已保留当前选择。仍可保存其他修改或移除所选群。",
+    },
     form: {
       createTitle: "新建定时任务",
       editTitle: "编辑任务",
@@ -1084,6 +1267,8 @@ export const zhCN: Translations = {
         maxContinuations: "已达到继续处理的次数上限",
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
+        loopCapped: "重复工具调用触发了安全停止",
+        recursionCapped: "运行达到了步数上限",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",
@@ -1120,6 +1305,8 @@ export const zhCN: Translations = {
       invalidGoal: "目标为空，或超过了 {max_chars} 个字符。",
       goalRequiresFreshThread: "设置目标时，每次运行都必须新建对话。",
       invalidStopCondition: "停止条件不能超过 {max_chars} 个字符。",
+      invalidNotificationGroup:
+        "此飞书群当前不可用，请选择其他群或移除额外群通知。",
       invalidMaxRuns: "运行次数上限必须是不小于 1 的整数。",
       endAtInPast: "请选择一个未来的结束时间。",
       endAtBeforeFirstRun: "结束时间至少要留出一次运行。",
@@ -1263,8 +1450,9 @@ export const zhCN: Translations = {
       "你可以在右上角的菜单里随时保存这个智能体，就算目前还只是初稿也可以。",
     saveCommandMessage:
       "请现在根据我们目前已经讨论的全部内容保存这个自定义智能体。这就是我明确的保存确认。如果仍有少量细节缺失，请根据上下文做出合理假设，生成一份简洁的英文初始 SOUL.md，并直接调用 setup_agent，不要再向我索要额外确认。",
+    agentSaveFailed: "QcdocAgent 未能保存这个智能体。请查看工具错误后重试。",
     agentCreatedPendingRefresh:
-      "智能体已创建，但 QcdocAgent 暂时还无法读取到它。请稍后刷新当前页面。",
+      "QcdocAgent 未能确认智能体已保存，请重新尝试保存。",
     more: "更多操作",
     agentCreated: "智能体已创建！",
     startChatting: "开始对话",
@@ -1274,14 +1462,27 @@ export const zhCN: Translations = {
     settingsDisplayName: "显示名称",
     settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
+    settingsToolGroups: "工具权限",
+    settingsToolGroupsHint: "限制该智能体及其委派任务可以使用的已配置工具组。",
+    settingsToolGroupsAll: "使用全部已配置工具组",
+    settingsToolGroupsLoadFailed: "无法加载工具组。",
+    settingsToolGroupUnavailable: "不可用",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
     settingsKnowledge: "默认知识库",
     settingsKnowledgeHint:
       "新对话默认使用此知识库范围，单条消息可以临时覆盖。选择全部知识库可解除绑定。",
     settingsKnowledgeReset: "使用全部知识库",
+    settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
+    settingsModelSwitchNeedsCatalog:
+      "请先加载所选模型，再保存模型切换。你可以重试加载，或恢复原模型后保存其他修改。",
+    settingsReasoningUnsupported: "不支持",
+    settingsThinkingRequiredHint:
+      "此模型必须开启思考，已保存的关闭设置可能导致运行无法开始。请选择继承或开启以替换该值。",
+    settingsReasoningUnsupportedHint:
+      "所选模型不支持此已保存值。请选择继承或支持的值以替换它。",
     settingsTemperature: "温度",
     settingsTemperatureHint: "0 = 确定性输出，越高越发散（0–2）。",
     settingsMaxTokens: "最大输出 token",
@@ -1327,6 +1528,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    streamServerError: (status) =>
+      `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",
     outlineAttachmentFallback: "图片或文件消息",
   },
@@ -1431,7 +1634,8 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
-    setupTitle: (name: string) => `连接 ${name}`,
+    setupTitle: (name: string) =>
+      /^[A-Za-z0-9]/.test(name) ? `连接 ${name}` : `连接${name}`,
     setupEditTitle: (name: string) => `修改 ${name}`,
     wechatQr: {
       restart: "重新扫码",
@@ -1488,6 +1692,34 @@ export const zhCN: Translations = {
       expiredTitle: "二维码已过期",
       failedTitle: "连接未完成",
     },
+    // A Latin name keeps the usual spaces ("发给 Slack 机器人"); a Chinese one
+    // does not ("发给飞书机器人").
+    bindingCode: {
+      description: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `把下面这条命令发给 ${provider} 机器人，即可绑定到你的 QcdocAgent 账号。`
+          : `把下面这条命令发给${provider}机器人，即可绑定到你的 QcdocAgent 账号。`,
+      loading: "正在生成绑定码…",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      expiresAt: (time: string) => `${time} 过期`,
+      waiting: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `正在等待 ${provider} 中的绑定消息…`
+          : `正在等待${provider}中的绑定消息…`,
+      connected: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `${provider} 已连接`
+          : `${provider}已连接`,
+      done: "完成",
+      expired: "绑定码已过期。",
+      newCode: "重新生成绑定码",
+      failed: "无法生成绑定码。",
+      tooManyCodes:
+        "未使用的绑定码太多。请先用已有的绑定码，或等它们过期（约 10 分钟）后再试。",
+      retry: "重试",
+    },
     setupDescription:
       "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
     saveAndConnect: "保存并连接",
@@ -1505,8 +1737,8 @@ export const zhCN: Translations = {
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
     scheduledUpdates: {
-      supported: "定时任务通知：会发送到这里",
-      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
+      supported: "定时任务通知：已支持，可在通知设置中管理",
+      supportedAfterConnect: "定时任务通知：已支持，连接后可管理通知",
       unsupported: "定时任务通知：此应用暂不支持",
     },
   },
@@ -1522,6 +1754,9 @@ export const zhCN: Translations = {
   // Tool calls
   toolCalls: {
     details: "工具详情",
+    failed: "执行失败",
+    scheduleTaskPending: "定时任务操作",
+    stopScheduledTaskPending: "暂停此定时任务",
     toolName: "工具名称",
     callId: "调用 ID",
     input: "输入",
@@ -1582,6 +1817,42 @@ export const zhCN: Translations = {
     requiredA11yLabel: "必填",
     selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
+    approval: {
+      modeLabel: "工具权限",
+      modeAsk: "请求批准",
+      modeAuto: "自动审批",
+      modeFull: "完全访问",
+      askDescription: "需要审批的操作，由你批准后执行。",
+      autoDescription: "逐次审核操作；风险或授权需要你决定时，再请求批准。",
+      fullDescription: "跳过逐次审批，仍受部署规则和工具账户权限限制。",
+      approveThread: "本会话允许",
+      grantScope: "仅限此工具和完全相同的参数，可在“工具权限”中撤销。",
+      editArguments: "修改参数",
+      fullArguments: "完整参数",
+      invalidArguments: "请输入有效的 JSON 对象，服务端还会校验工具参数格式。",
+      revokeGrants: "撤销会话授权",
+      grantsRevoked: "已撤销会话授权",
+      childApproval: "子代理正在等待你的批准。",
+      title: "工具调用需要审批",
+      description:
+        "继续前请检查每个操作。较长的值可能在显示时被截断，但省略的内容仍会完整参与执行。批准后将尝试执行工具，其他执行检查仍然有效。",
+      waiting: "等待审批",
+      loading: "正在加载审批详情...",
+      loadFailed:
+        "无法加载审批详情。此对话仍在等待审批，请重新加载详情后再继续。",
+      reload: "重新加载审批详情",
+      approve: "批准",
+      reject: "拒绝",
+      approveAll: "全部批准",
+      rejectAll: "全部拒绝并结束",
+      submitDecisions: "提交所选决定",
+      reasonLabel: "拒绝理由（可选）",
+      reasonPlaceholder: "告诉智能体不应执行这些工具的原因……",
+      submitFailed: "审批提交失败。请检查所选决定后重试。",
+      submitTimeout: "审批提交超时，已停止本次提交。请检查所选决定后重试。",
+      featureDisabled: "工具审批现已关闭，仍可安全地全部拒绝并结束。",
+      noPending: "该审批已不再挂起，请重新加载对话后重试。",
+    },
   },
 
   uploads: {
@@ -1663,6 +1934,30 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 QcdocAgent 的界面和行为。",
     models: {
+      connectionSettings: "渠道配置",
+      importTitle: "获取并添加模型",
+      importDescription:
+        "获取渠道目录后，勾选模型并测试添加。测试可能产生接口费用，只有通过流式工具调用测试的模型才会启用。",
+      savedConnection: "使用已有渠道配置",
+      newConnection: "新建渠道配置",
+      fetchModels: "获取模型",
+      searchModels: "搜索模型…",
+      selectVisible: "选择当前结果",
+      clearSelection: "清空选择",
+      alreadyConfigured: "已配置",
+      noCatalogResults: "没有匹配的模型，请修改搜索或手动添加。",
+      catalogTruncated:
+        "目录最多显示 2,000 个模型或 20 页，其余模型可手动添加。",
+      discovery_unsupported: "此接口不支持获取模型目录，请手动填写模型 ID。",
+      discovery_failed: "获取目录失败，请检查渠道连接后重试。",
+      importUncertain: "结果未确认，重试时会检查模型是否已经保存。",
+      importStopped:
+        "已停止，已完成的模型会保留；可重试确认最后一项的保存结果。",
+      stopImport: "停止",
+      closeCatalog: "完成",
+      catalogCount: (visible, total, selected) =>
+        `显示 ${visible} / ${total} 个 · 已选 ${selected} 个`,
+      testAndAdd: (count) => `测试并添加（${count}）`,
       title: "模型",
       description: "管理供用户选择的共享模型。服务器配置中的模型为只读。",
       adminOnly: "只有管理员可以管理共享模型，演示模式不支持此功能。",
@@ -1679,8 +1974,8 @@ export const zhCN: Translations = {
       enable: "启用",
       disable: "停用",
       formDescription:
-        "接入 OpenAI 兼容接口。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
-      provider: "接口类型",
+        "选择厂商并填写 API Key 和模型 ID。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
+      provider: "模型厂商",
       name: "唯一名称",
       displayName: "显示名称",
       endpoint: "接口基础地址",
@@ -1701,9 +1996,44 @@ export const zhCN: Translations = {
         "接口已响应，但未返回工具调用，请检查模型的工具调用能力。",
       connection_failed:
         "连接测试失败，请检查接口地址、凭据、模型 ID 以及流式输出和工具调用支持。",
+      customProvider: "自定义 OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "高级设置",
+      providerDefault: "厂商默认值",
+      requiredKey: "填写此厂商的 API Key",
+      providerChanged: "已切换连接，请重新填写 API Key；不会复用原连接的密钥。",
+      missing_api_key:
+        "此厂商需要 API Key。请填写密钥，或先停用模型再清除密钥。",
+      authentication_failed:
+        "认证失败，请检查 API Key 是否属于所选厂商、地域或套餐。",
+      response_limit: "测试响应超出输出限制。",
+      revisionConflict:
+        "模型已变更或名称已被占用。请重新加载列表并打开编辑器；当前草稿已保留。",
+      keyOrCapabilities:
+        "请检查 API Key 和能力覆盖配置。清除预设模型密钥前须先停用模型。",
+      invalidModel: "模型配置无效，请检查厂商、模型 ID 和高级设置。",
+    },
+    users: {
+      title: "用户管理",
+      description:
+        "停用或恢复本部署中的账号登录。被停用的账号在所有认证入口都会被拒绝，其现有会话立即失效。",
+      adminOnly: "只有管理员可以管理用户，演示模式不支持此功能。",
+      loading: "正在加载用户…",
+      failed: "用户列表加载失败。",
+      reload: "重新加载",
+      empty: "暂无用户。",
+      email: "邮箱",
+      role: "角色",
+      status: "状态",
+      active: "正常",
+      disabled: "已停用",
+      disable: "停用",
+      enable: "启用",
+      updateFailed: "账号更新失败。",
     },
     sections: {
       models: "模型",
+      users: "用户",
       account: "账号",
       appearance: "外观",
       channels: "渠道",
@@ -1801,7 +2131,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -2082,6 +2412,15 @@ export const zhCN: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "无法加载",
+      diagnosticsScope:
+        "仅报告你自己的自定义技能的 YAML 语法错误。修正 SKILL.md 文件后请重新加载。不报告缺少头部、元数据校验错误、无法读取或非 UTF-8 编码的文件，不包含共享目录和外部链接包。",
+      diagnosticsInvalid: "YAML 头部格式错误。",
+      diagnosticsQuote: "包含“冒号加空格”的值需要用引号包裹。",
+      diagnosticsRefresh: "重新加载技能",
+      diagnosticsRefreshing: "正在重新加载…",
+      diagnosticsFailed: "无法检查自定义技能的 YAML 错误，请重新加载后重试。",
+      diagnosticsReloadFailed: "重新加载技能失败，请重试。",
       exportPrevious: "上 50 项",
       exportNotices: {
         skill_export_yaml_alias:
@@ -2161,6 +2500,34 @@ export const zhCN: Translations = {
       testBody: "这是一条测试通知。",
       notSupported: "当前浏览器不支持通知功能。",
       disableNotification: "关闭通知",
+      channels: {
+        title: "定时任务通知",
+        description:
+          "选择哪些已连接的应用接收定时任务更新。关闭通知不影响聊天。待发和重试中的通知会取消，重新开启不会补发旧通知。已经开始投递的通知仍可能送达。",
+        providers: {
+          feishu: "飞书 / Lark",
+          wecom: "企业微信",
+          wechat: "微信",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) => `${provider}定时任务通知`,
+        eventsTitle: "普通任务与目标提醒",
+        eventsDescription:
+          "可选：通过上方已开启的应用接收普通网页或后台任务、目标的运行提醒（默认关闭）。",
+        events: {
+          run_completed: "任务或目标已完成",
+          run_failed: "任务或目标运行失败",
+          human_input_requested: "需要你参与确认",
+        },
+        eventToggleLabel: (event: string) => `${event}通知`,
+        loading: "正在加载通知偏好…",
+        saving: "正在保存…",
+        loadFailed: "无法加载通知偏好，请重试。",
+        saveFailed: "未能保存此更改，当前仍显示之前的设置，请重试。",
+        unavailable: "当前服务尚不支持通知偏好设置。",
+        empty: "请在设置 → 频道中连接支持定时任务通知的应用。",
+        retry: "重试",
+      },
     },
     account: {
       profileTitle: "个人信息",
@@ -2223,6 +2590,10 @@ export const zhCN: Translations = {
       sso_account_exists:
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
+      account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

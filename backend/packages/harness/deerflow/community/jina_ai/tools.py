@@ -57,12 +57,13 @@ async def web_fetch_tool(url: str) -> str:
     proxy = None
     trust_env = True
     request_options = {}
-    config = get_app_config().get_tool_config("web_fetch")
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    config = (await asyncio.to_thread(get_app_config)).get_tool_config("web_fetch")
     if config is not None:
         timeout = _coerce_timeout(config.model_extra.get("timeout"), timeout)
         proxy = _coerce_proxy(config.model_extra.get("proxy"))
         trust_env = _coerce_bool(config.model_extra.get("trust_env"), trust_env)
-        request_options = {key: config.model_extra[key] for key in ("max_retries", "retry_budget_seconds", "max_response_bytes") if key in config.model_extra}
+        request_options = {key: config.model_extra[key] for key in ("max_retries", "retry_budget_seconds", "max_response_bytes", "request_admission") if key in config.model_extra}
     html_content = await jina_client.crawl(url, return_format="html", timeout=timeout, proxy=proxy, trust_env=trust_env, **request_options)
     if isinstance(html_content, str) and html_content.startswith("Error:"):
         return html_content

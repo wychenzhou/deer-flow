@@ -1,6 +1,7 @@
 import re
 from abc import ABC, abstractmethod
 
+from deerflow.sandbox.command_scope import CommandScopes
 from deerflow.sandbox.search import GrepMatch
 
 # POSIX env-var name rule: letter or underscore, then letters/digits/underscores.
@@ -45,6 +46,9 @@ class Sandbox(ABC):
     """Abstract base class for sandbox environments"""
 
     _id: str
+    # Explicit POSIX directory used for confined remote artifact snapshots.
+    # Custom providers remain unsupported until they declare their real root.
+    artifact_root: str | None = None
 
     #: Whether ``execute_command`` reuses one persistent shell session across
     #: calls (shell state — exports, cwd, functions — survives from one call
@@ -77,8 +81,20 @@ class Sandbox(ABC):
     #: silently mounting credentials.
     lark_cli_broker: bool | None = False
 
+    supports_command_cancellation = False
+
     def __init__(self, id: str):
         self._id = id
+        self._command_scopes = CommandScopes()
+
+    def request_command_cancel(self, scope_id: str) -> None:
+        """Signal a cancelled bash execution without blocking the event loop."""
+        if self.supports_command_cancellation:
+            self._command_scopes.request_cancel(scope_id)
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        """Stop commands owned by this execution; legacy providers keep their behavior."""
+        self.request_command_cancel(scope_id)
 
     @property
     def id(self) -> str:
@@ -139,8 +155,8 @@ class Sandbox(ABC):
         return self.execute_command(command, env=env, timeout=timeout)
 
     def release_command_scope(self, scope_id: str) -> None:
-        """Release provider-specific command state for one execution scope."""
-        del scope_id
+        """Forget completed execution ownership without stopping background services."""
+        self._command_scopes.release(scope_id)
 
     @abstractmethod
     def read_file(
@@ -162,19 +178,29 @@ class Sandbox(ABC):
         pass
 
     @abstractmethod
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download the binary content of a file.
 
         Args:
             path: The absolute path of the file to download.
+            max_bytes: Optional non-negative byte ceiling, capped by the
+                provider's own limit. Enforce it during reading, not after an
+                unbounded SDK read. Streaming providers stop on the first
+                overflowing chunk and close the stream on every exit; file and
+                exec readers may probe one extra byte. Never return a truncated
+                prefix as success. None preserves the provider's default cap.
+                Custom providers must support this keyword to serve image
+                reads; callers must not retry without it on TypeError.
 
         Returns:
             Raw file bytes.
 
         Raises:
+            ValueError: If max_bytes is not a non-negative integer or None.
             PermissionError: If path traversal is detected or the path is outside
                 the allowed virtual prefix.
-            OSError: If the file cannot be read or does not exist.  Both local
+            OSError: If the file cannot be read or does not exist, or with
+                errno.EFBIG if it exceeds the effective byte limit. Both local
                 and remote implementations must raise ``OSError`` so callers
                 have a single exception type to handle.
         """

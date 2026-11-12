@@ -11,6 +11,7 @@ Exit codes:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -122,9 +123,8 @@ def _has_non_empty_token(value: object) -> bool:
 # (``load_codex_cli_credential``, ``_extract_claude_code_credential`` + ``is_expired``), which
 # stays the source of truth; keep the two in lockstep when the loader changes. The mirror is
 # deliberate: importing the loader could consume the one-shot
-# CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR handoff. Strictness differs on purpose in one
-# place -- doctor rejects a whitespace-only token that the runtime's truthiness check would
-# accept before failing at the provider.
+# CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR handoff. Both sides treat a whitespace-only token
+# as absent in every layout, so doctor accepts exactly the files the loader accepts.
 def _codex_auth_file_has_access_token(path: Path) -> bool:
     data = _load_json_object(path)
     if data is None:
@@ -413,6 +413,90 @@ def check_config_loadable(config_path: Path) -> CheckResult:
         )
 
 
+def check_memory_backend_config(config_path: Path) -> CheckResult:
+    """Statically validate the selected memory backend's backend_config.
+
+    A stale backend_config (DeerMem-only keys left in place after switching
+    manager_class to openviking) used to surface only when MemoryMiddleware
+    constructed the manager mid-conversation, after model tokens had already
+    been spent. from_backend_config is side-effect-free, so the same errors
+    can be reported here before an agent turn is accepted.
+    """
+    if not config_path.exists():
+        return CheckResult("memory backend config", "skip")
+
+    try:
+        config = _load_app_config(config_path)
+    except Exception:
+        # check_config_loadable already reports load failures.
+        return CheckResult("memory backend config", "skip")
+
+    return _check_memory_backend_config(config)
+
+
+def _check_memory_backend_config(config: object) -> CheckResult:
+    memory = getattr(config, "memory", None)
+    manager_class = str(getattr(memory, "manager_class", "") or "").strip()
+    label = f"memory backend config ({manager_class or 'unspecified'})"
+    if memory is None or not getattr(memory, "enabled", True):
+        return CheckResult(label, "skip", "memory disabled")
+
+    backend_config = getattr(memory, "backend_config", None) or {}
+    if not _resolves_to_builtin_openviking(manager_class):
+        return CheckResult(label, "skip", "no static validator for this backend")
+
+    try:
+        from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
+    except Exception as exc:
+        # Importing the backend package executes openviking/__init__.py, which
+        # pulls pydantic and deerflow internals; a broken backend environment
+        # degrades to a skip instead of crashing the report (same policy as
+        # resolve_config_path).
+        return CheckResult(label, "skip", str(exc))
+
+    try:
+        OpenVikingConfig.from_backend_config(dict(backend_config))
+    except Exception as exc:
+        detail = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+        return CheckResult(label, "fail", detail, fix=_memory_backend_config_fix(detail))
+    return CheckResult(label, "ok")
+
+
+def _resolves_to_builtin_openviking(manager_class: str) -> bool:
+    """True when manager_class resolves to the built-in OpenViking manager.
+
+    Only the built-in backend's config contract is known here: a custom
+    ``OpenVikingMemoryManager`` subclass pointed at by a dotted path owns its
+    backend_config shape, so doctor must not reject it with the built-in
+    rules. Resolution failures are the factory's to report (it fails loudly
+    in get_memory_manager), not this check's.
+    """
+    try:
+        from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
+        from deerflow.agents.memory.manager import _resolve_manager_class
+    except Exception:
+        return False
+    try:
+        return _resolve_manager_class(manager_class) is OpenVikingMemoryManager
+    except Exception:
+        return False
+
+
+def _memory_backend_config_fix(detail: str) -> str | None:
+    """Remediation matched to the validator's failure modes; None lets the
+    verbatim error speak for itself."""
+    if "USER API key is missing; set" in detail:
+        var = detail.rsplit("set ", 1)[-1].strip().rstrip(".")
+        return f"Add {var}=<your-key> to your .env file"
+    if "Unknown OpenViking backend_config fields" in detail:
+        return "Remove the fields named in the error from memory.backend_config, or switch manager_class back"
+    if "trusted mode is no longer supported" in detail:
+        return "Use a USER API key (api_key_env) and configure owner_user_id instead of auth_mode/account"
+    if "custom HTTP client fields are no longer supported" in detail:
+        return "Remove the custom HTTP client fields from memory.backend_config"
+    return None
+
+
 def check_llm_api_key(config_path: Path) -> list[CheckResult]:
     """Check that each model's env var is set in the environment."""
     if not config_path.exists():
@@ -589,7 +673,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             )
 
         free_providers = {
-            "web_search": {"ddg_search": "DuckDuckGo (no key needed)"},
+            "web_search": {
+                "ddg_search": "DuckDuckGo (no key needed)",
+                "youcom": "You.com (works with no key; YDC_API_KEY enables the full Search API)",
+            },
             "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
         }
@@ -604,7 +691,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "serper": "SERPER_API_KEY",
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
+                "webz": "WEBZ_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
@@ -612,6 +701,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
             },
             "image_search": {
@@ -649,6 +739,53 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
         def _browserless_self_hosted(tool: dict) -> bool:
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
             return "browserless.io" not in base_url
+
+        def _delegated_backend_error(tool: dict) -> tuple[str, str] | None:
+            if tool_name not in {"web_fetch", "web_capture"}:
+                return None
+            providers = {
+                "browserless": ("Browserless", "http://localhost:3032"),
+                "crawl4ai": ("Crawl4AI", "http://localhost:11235"),
+                "firecrawl": ("Firecrawl", None),
+                "fastcrw": ("fastCRW", "https://fastcrw.com/api"),
+            }
+            use = str(tool.get("use") or "")
+            for provider, (provider_label, default_url) in providers.items():
+                if not use.startswith(f"deerflow.community.{provider}."):
+                    continue
+                if tool_name == "web_capture" and provider != "browserless":
+                    return None
+
+                from deerflow.community.url_safety import validate_delegated_backend_url
+                from deerflow.config.app_config import AppConfig
+
+                # Resolve only backend settings: credential diagnostics below
+                # still need the literal values and environment references.
+                cfg = AppConfig.resolve_env_variables({key: tool[key] for key in ("base_url", "network_isolation_confirmed") if key in tool})
+                base_url = cfg.get("base_url", default_url)
+                if provider == "fastcrw" and cfg.get("base_url") is None:
+                    base_url = os.environ.get("CRW_API_URL", default_url)
+                if provider == "firecrawl" and base_url is None:
+                    # The SDK uses its public cloud endpoint when unset.
+                    return None
+                confirmed = cfg.get("network_isolation_confirmed")
+                confirmed = confirmed if isinstance(confirmed, bool) else isinstance(confirmed, str) and confirmed.strip().lower() in {"1", "true", "yes", "on"}
+                error = validate_delegated_backend_url(base_url, network_isolation_confirmed=confirmed)
+                return (provider_label, error) if error else None
+            return None
+
+        # Check every delegated backend before any provider's early success.
+        # allow_private_addresses permits targets, not backend delegation.
+        for tool in tool_entries:
+            backend_error = _delegated_backend_error(tool)
+            if backend_error:
+                provider, error = backend_error
+                return CheckResult(
+                    label,
+                    "warn",
+                    f"{provider} backend: {error}",
+                    fix="Configure an HTTP(S) backend URL; for a private or unverifiable backend, isolate its egress before setting network_isolation_confirmed: true. See backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation",
+                )
 
         for tool in tool_entries:
             use = tool.get("use", "")
@@ -819,6 +956,10 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 
 def main() -> int:
+    # Keep reporting usable on terminals and pipes with legacy encodings.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
+
     project_root = Path(__file__).resolve().parents[1]
 
     # Load .env early so key checks work
@@ -868,6 +1009,7 @@ def main() -> int:
         config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
+        check_memory_backend_config(config_path),
         check_models_configured(config_path),
     ]
     sections.append(("Configuration", cfg_checks))
@@ -925,4 +1067,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the unit tests call main() in-process
+    # under pytest, whose argv must not reach argparse.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/doctor.py",
+        description=("DeerFlow Health Check (make doctor): checks system requirements, configuration, LLM provider, and optional components, then prints an actionable report."),
+    )
+    parser.parse_args()
     sys.exit(main())

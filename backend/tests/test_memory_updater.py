@@ -1,6 +1,9 @@
 import asyncio
 import copy
+import json
+import logging
 import threading
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +19,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _build_staleness_section,
     _coerce_source_confidence,
     _extract_text,
+    _normalize_memory_update_fact,
     _parse_memory_update_response,
 )
 from deerflow.agents.memory.manager import LangfuseMemoryCallbacks
@@ -191,8 +195,8 @@ def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> N
     )
 
     assert "lastConfirmedAt" not in without_signal["facts"][0]
-    assert with_signal["facts"][0]["lastConfirmedAt"].endswith("Z")
-    assert with_signal["facts"][0]["confirmationCount"] == 1
+    assert "lastConfirmedAt" not in with_signal["facts"][0]
+    assert "confirmationCount" not in with_signal["facts"][0]
 
     confidence_only = _make_updater()
     without_hybrid_tracking = confidence_only._apply_updates(
@@ -206,14 +210,14 @@ def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> N
 @pytest.mark.parametrize(
     ("prior_count", "expected_count"),
     [
-        (3, 4),
-        (0, 1),
-        (True, 1),
-        (-1, 1),
-        ("3", 1),
+        (3, 3),
+        (0, 0),
+        (True, True),
+        (-1, -1),
+        ("3", "3"),
     ],
 )
-def test_apply_updates_normalizes_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
+def test_lexical_signal_does_not_mutate_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
     updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
     current_memory = _make_memory(
         facts=[
@@ -267,6 +271,9 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
             fact_confidence_threshold=0.7,
         )
     )
+    now = datetime.now(UTC)
+    recent_timestamp = now.isoformat().replace("+00:00", "Z")
+    stale_timestamp = (now - timedelta(days=365)).isoformat().replace("+00:00", "Z")
     current_memory = _make_memory(
         facts=[
             *[
@@ -275,7 +282,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                     "content": f"high {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent_timestamp,
                 }
                 for index in range(8)
             ],
@@ -284,15 +291,15 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                 "content": "stale high confidence",
                 "category": "preference",
                 "confidence": 0.9,
-                "createdAt": "2025-01-01T00:00:00Z",
+                "createdAt": stale_timestamp,
             },
             {
                 "id": "confirmed_recently",
                 "content": "recently confirmed preference",
                 "category": "preference",
                 "confidence": 0.7,
-                "createdAt": "2025-01-01T00:00:00Z",
-                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                "createdAt": stale_timestamp,
+                "lastConfirmedAt": recent_timestamp,
             },
         ]
     )
@@ -1086,6 +1093,47 @@ class TestFormatConversationForUpdate:
         assert "Tom &amp; Jerry" in result
         assert "a &lt; b" in result
 
+    def test_content_less_message_is_skipped_instead_of_rendering_none(self):
+        """A content-less message must not become the literal "None" turn.
+
+        ``str(None)`` is truthy, so the previous fallback fed ``Assistant: None``
+        to the extraction prompt as if the assistant had said it. Sibling helpers
+        (``utils/messages.py:message_content_to_text``, the mem0 copy, and
+        ``message_processing.extract_message_text``) all return "" here.
+        """
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.content = None
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_whitespace_only_assistant_turn_is_skipped(self):
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.content = "   "
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_image_only_blocks_do_not_leak_the_block_repr(self):
+        """An image-only turn contributes no text, not a base64 Python repr."""
+        payload = "data:image/png;base64," + "A" * 2000
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = [{"type": "image_url", "image_url": {"url": payload}}]
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_text_blocks_render_when_an_image_block_is_also_present(self):
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = [
+            {"type": "text", "text": "what is in this screenshot?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+
+        result = format_conversation_for_update([msg])
+        assert result == "User: what is in this screenshot?"
+
 
 # ---------------------------------------------------------------------------
 # update_memory - structured LLM response handling
@@ -1341,7 +1389,7 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
 
     def test_correction_hint_empty_when_not_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1358,7 +1406,7 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" not in prompt
+        assert "They are not evidence of user intent" not in prompt
 
     def test_sync_update_memory_wrapper_works_in_running_loop(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1538,7 +1586,7 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Positive reinforcement signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
 
     def test_reinforcement_hint_absent_when_not_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1555,7 +1603,7 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Positive reinforcement signals were detected" not in prompt
+        assert "They are not evidence of user intent" not in prompt
 
     def test_both_hints_present_when_both_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1572,8 +1620,8 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" in prompt
-        assert "Positive reinforcement signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
+        assert "They are not evidence of user intent" in prompt
 
 
 class TestFinalizeCacheIsolation:
@@ -1887,6 +1935,86 @@ class TestNullConfidenceDoesNotBlockUpdates:
         assert _coerce_source_confidence({"confidence": None}) == 0.5
         assert _coerce_source_confidence({}) == 0.5
         assert _coerce_source_confidence({"confidence": 0.83}) == 0.83
+
+    def test_coerce_source_confidence_tolerates_an_unbounded_int(self) -> None:
+        # A stored fact can carry a JSON integer such as 10**400; float() raises
+        # OverflowError, which must fall back like any other unusable value.
+        assert _coerce_source_confidence({"confidence": 10**400}) == 0.5
+
+
+class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
+    """A model-emitted confidence outside [0, 1] must not fail the whole update.
+
+    Storage rejects an out-of-range confidence, so an unchecked proposal made
+    the whole extraction batch fail on every turn (the watermark never
+    advanced and the same paid call repeated). The extraction normalizer now
+    treats the range like every other malformed shape: the item is dropped with
+    a warning and the rest of the update still applies — except when the same
+    batch proposes ``factsToRemove``, where dropping a fact invalidates
+    ``replacementFactIndex`` positions and the parse still fails closed
+    (pinned below).
+    """
+
+    @pytest.mark.parametrize("confidence", [1.5, 95, -0.1, 10**400], ids=["above-one", "percent", "negative", "unbounded-int"])
+    def test_normalize_rule_drops_out_of_range_confidence(self, confidence: object) -> None:
+        normalized = _normalize_memory_update_fact({**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": confidence})
+        assert normalized is None
+
+    @pytest.mark.parametrize("confidence", [0.0, 0.5, 1.0])
+    def test_normalize_rule_keeps_in_range_confidence(self, confidence: float) -> None:
+        normalized = _normalize_memory_update_fact({**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": confidence})
+        assert normalized is not None
+        assert normalized["confidence"] == confidence
+
+    def test_update_memory_drops_the_bad_fact_and_keeps_the_rest(self, tmp_path) -> None:
+        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+
+        response = {
+            "user": {},
+            "history": {},
+            "newFacts": [
+                {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "category": "preference", "confidence": 0.9},
+                {**_DURABLE_USER_FACT, "content": "User lives in Berlin", "category": "context", "confidence": 1.5},
+            ],
+            "factsToRemove": [],
+        }
+        storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+        synthesized = MagicMock()
+        synthesized.content = json.dumps(response)
+        model = MagicMock()
+        model.invoke = MagicMock(return_value=synthesized)
+        model.ainvoke = AsyncMock(return_value=synthesized)
+        updater = _make_updater(
+            config=_memory_config(fact_confidence_threshold=0.7, max_facts=100),
+            storage=storage,
+            llm=model,
+        )
+        msg = MagicMock(type="human", content="Hello")
+        ai_msg = MagicMock(type="ai", content="Hi", tool_calls=[])
+
+        assert updater.update_memory([msg, ai_msg], thread_id="thread-confidence", agent_name="__default__") is True
+
+        stored = storage.load(agent_name="__default__")
+        assert [fact["content"] for fact in stored["facts"]] == ["User prefers dark mode"]
+
+    def test_out_of_range_drop_logs_the_raw_confidence(self, caplog) -> None:
+        with caplog.at_level(logging.WARNING, logger="deerflow.agents.memory.backends.deermem.deermem.core.updater"):
+            normalized = _normalize_memory_update_fact({**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": 95})
+        assert normalized is None
+        assert any("out-of-range confidence" in message and "95" in message for message in caplog.messages)
+
+    def test_removal_batch_still_fails_closed_when_a_fact_is_dropped(self) -> None:
+        payload = {
+            "user": {},
+            "history": {},
+            "factsToRemove": [{"id": "fact_old", "scope": "user", "reason": "Retracted by the user"}],
+            "newFacts": [
+                {**_DURABLE_USER_FACT, "content": "User prefers dark mode", "confidence": 0.9},
+                {**_DURABLE_USER_FACT, "content": "User lives in Berlin", "confidence": 1.5},
+            ],
+        }
+        with pytest.raises(json.JSONDecodeError, match="Unsafe partial"):
+            _parse_memory_update_response(json.dumps(payload))
 
 
 class TestParseMemoryUpdateFactsToRemoveGate:

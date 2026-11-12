@@ -9,9 +9,65 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
@@ -39,37 +95,61 @@ export const enUS: Translations = {
     catalogHint:
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
+    detail: {
+      guide: "Read the guide",
+      gettingStarted: "Get started",
+      requirements: "Before you start",
+      loaded: "Loaded",
+      loadedHint:
+        "This extension is loaded. Follow the usage instructions to get started.",
+      tools: "Registered tools",
+      pages: "Workspace pages",
+      management: "Usage & management",
+      readyHint:
+        "Your administrator has enabled this extension. It is ready to use.",
+      disabledHint:
+        "This extension is disabled. Ask your administrator to enable it.",
+      failedHint:
+        "The extension page could not load. Refresh extensions to try again.",
+      noPageHint:
+        "This extension has no standalone page. Check the guide for how to use it in conversations or tasks.",
+      guideHint:
+        "Read the guide to explore what this extension adds to QcdocAgent and how to use it.",
+      technicalDetails: "Technical details",
+      package: "Package",
+      namespace: "Extension ID",
+      refresh: "Refresh extensions",
+      refreshHint:
+        "Refresh the page after your administrator updates an extension.",
+    },
     catalog: {
-      agentTeams: {
-        title: "Agent teams",
-        description:
-          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
-      },
-      bookmarks: {
-        title: "Bookmarks",
-        description:
-          "Save useful answers and find and organize your own bookmarks on a dedicated page.",
-      },
-      context: {
-        title: "Context pruning",
-        description:
-          "Shorten older read-only tool results while preserving recent messages and native summaries.",
-      },
-      classify: {
-        title: "Text classification",
-        description:
-          "Label a list of texts with supplied categories using the deployment-configured classification service.",
-      },
-      screening: {
-        title: "Content risk warnings",
-        description:
-          "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
-      },
-      example: {
-        title: "Extension development example",
-        description:
-          "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      context: bundledCopy("deerflow-extension-jev-context", "en-US"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
+      workflows: bundledCopy("deerflow-extension-workflows", "en-US"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "en-US",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "en-US"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "en-US"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "en-US",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "en-US",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
+      example: bundledCopy("deerflow-extension-example", "en-US"),
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
@@ -220,6 +300,15 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
   skillUsage: {
     used: "Skills used",
     title: "Skills",
@@ -251,6 +340,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -287,6 +381,9 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "Preparing preview...",
+    resourcesUnavailable:
+      "Some preview resources could not be loaded. View the source or download the files for the complete content.",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `Showing the first ${previewSize} of ${totalSize}.`
@@ -334,6 +431,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -501,6 +604,7 @@ export const enUS: Translations = {
       waitingForYou: "Waiting for you",
       waiting: "Waiting",
       paused: "Paused",
+      waitingApproval: "Waiting for approval",
       autoContinuedOnce: "Auto-continued once",
       autoContinuedMany: "Auto-continued {count} times",
       details: "Details",
@@ -522,12 +626,19 @@ export const enUS: Translations = {
           "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        loopCapped:
+          "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+        recursionCapped:
+          "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
           "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
         needsInputCard: "Answer the question above to continue.",
         needsInputReply: "Reply with the missing details to continue.",
+        needsApproval: "Review the tool approval above to continue.",
+        needsApprovalReload:
+          "Approval details failed to load. Use the reload-error panel above to try again.",
         external:
           "Goal check: waiting on something external. Send a message when it's ready.",
         unchecked: "{reason}. It's checked again after your next message.",
@@ -595,6 +706,25 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
@@ -729,8 +859,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {
@@ -814,7 +954,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -827,6 +969,18 @@ export const enUS: Translations = {
     cancel: "Cancel",
     retryItem: "Retry",
     exportResults: "Export JSONL",
+    viewResult: "Review result",
+    resultTitle: "Batch result",
+    resultDescription: "Stored report and captured evidence for this item.",
+    report: "Report",
+    evidence: "Captured evidence",
+    noEvidence: "No captured evidence",
+    acceptance: "Acceptance",
+    noReport: "No report has been stored yet.",
+    loadResultFailed: "Couldn't load batch result",
+    truncated: "Report truncated",
+    omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
     viewItems: "View items",
     hideItems: "Hide items",
     itemsFailed: "Couldn't load batch items",
@@ -1019,6 +1173,44 @@ export const enUS: Translations = {
         "Tasks created in chat that run more often than hourly need a safety cap.",
       submit: "Resume",
     },
+    notificationGroup: {
+      savedUnavailable:
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      clearSaved: "Clear group notification",
+      bind: "Bind a Feishu group",
+      bindWecom: "Bind a WeCom group",
+      bindQq: "Bind a QQ group",
+      name: "Group name",
+      nameHint:
+        "Name this group so you can recognize it when choosing a notification destination. Rebind a group to change its name.",
+      refresh: "Refresh group list",
+      bindInstructions:
+        "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
+      generating: "Generating a binding code…",
+      bindFailed: "Could not create a binding code. Try again.",
+      command: "Group binding command",
+      expiresAt: "Expires at {time}.",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      newCode: "Generate a new code",
+      close: "Close binding instructions",
+      label: "Also notify a group (optional)",
+      detailLabel: "Additional group",
+      none: "No additional group",
+      personalHint:
+        "Your personal notifications stay unchanged. The selected group also receives task updates.",
+      emptyHint: "Bind a group below, then refresh the list.",
+      loading: "Loading groups…",
+      unavailable: "Selected group unavailable",
+      unavailableHint:
+        "The selected group is no longer available. Keep it, remove it, or choose another group.",
+      unnamed: "Group name unavailable",
+      unnamedHint:
+        "Bind the group again with a recognizable name before selecting it.",
+      loadFailed:
+        "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    },
     form: {
       createTitle: "New scheduled task",
       editTitle: "Edit task",
@@ -1151,6 +1343,8 @@ export const enUS: Translations = {
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
+        loopCapped: "Repeated tool calls reached the safety limit",
+        recursionCapped: "The run reached its step limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:
@@ -1190,6 +1384,8 @@ export const enUS: Translations = {
       goalRequiresFreshThread: "A goal needs each run to start a new chat.",
       invalidStopCondition:
         "The stop condition must be at most {max_chars} characters.",
+      invalidNotificationGroup:
+        "This Feishu group is no longer available. Select another group or remove the additional notification.",
       invalidMaxRuns: "The run limit must be a whole number of at least 1.",
       endAtInPast: "Pick an end time in the future.",
       endAtBeforeFirstRun: "The end time must leave room for at least one run.",
@@ -1347,8 +1543,10 @@ export const enUS: Translations = {
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentSaveFailed:
+      "QcdocAgent could not save this agent. Review the tool error and try again.",
     agentCreatedPendingRefresh:
-      "The agent was created, but QcdocAgent could not load it yet. Please refresh this page in a moment.",
+      "QcdocAgent could not confirm the saved agent. Please try saving it again.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
@@ -1360,14 +1558,29 @@ export const enUS: Translations = {
       "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
     settingsKnowledgeHint:
       "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
+    settingsModelSwitchNeedsCatalog:
+      "Load the selected model before saving this model change. Retry loading, or restore the original model to save other changes.",
+    settingsReasoningUnsupported: "not supported",
+    settingsThinkingRequiredHint:
+      "This model requires thinking. The saved Off setting can prevent runs from starting. Choose Inherit or On to replace it.",
+    settingsReasoningUnsupportedHint:
+      "This saved value is not supported by the selected model. Choose Inherit or a supported value to replace it.",
     settingsTemperature: "Temperature",
     settingsTemperatureHint: "0 = deterministic, higher = more creative (0–2).",
     settingsMaxTokens: "Max output tokens",
@@ -1415,6 +1628,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    streamServerError: (status) =>
+      `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
     outlineLabel: "Conversation outline",
     outlineAttachmentFallback: "Image or file message",
   },
@@ -1584,6 +1799,24 @@ export const enUS: Translations = {
       expiredTitle: "QR code expired",
       failedTitle: "Unable to connect",
     },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your QcdocAgent account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
@@ -1601,9 +1834,10 @@ export const enUS: Translations = {
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
     scheduledUpdates: {
-      supported: "Scheduled task updates: sent here",
+      supported:
+        "Scheduled task updates: supported; manage in Notification settings",
       supportedAfterConnect:
-        "Scheduled task updates: available after you connect",
+        "Scheduled task updates: supported; connect to manage notifications",
       unsupported: "Scheduled task updates: not available for this app yet",
     },
   },
@@ -1619,6 +1853,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -1682,6 +1919,50 @@ export const enUS: Translations = {
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
+    approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
+      title: "Tool approval required",
+      description:
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
+      waiting: "Waiting for approval",
+      loading: "Loading approval details...",
+      loadFailed:
+        "Approval details could not be loaded. This conversation is still waiting for approval; reload the details before continuing.",
+      reload: "Reload approval details",
+      approve: "Approve",
+      reject: "Reject",
+      approveAll: "Approve all",
+      rejectAll: "Reject all and finish",
+      submitDecisions: "Submit decisions",
+      reasonLabel: "Rejection reason (optional)",
+      reasonPlaceholder: "Tell the agent why it should not run these tools...",
+      submitFailed:
+        "The approval could not be submitted. Review your decisions and try again.",
+      submitTimeout:
+        "The approval submission timed out and was stopped. Review your decisions and try again.",
+      featureDisabled:
+        "Tool approval is now disabled. You can still reject all and finish safely.",
+      noPending:
+        "This approval is no longer pending. Reload the conversation before retrying.",
+    },
   },
 
   // Subtasks
@@ -1767,6 +2048,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how QcdocAgent looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",
@@ -1785,7 +2094,7 @@ export const enUS: Translations = {
       enable: "Enable",
       disable: "Disable",
       formDescription:
-        "Connect an OpenAI-compatible endpoint. Testing sends a short streaming tool-call request and may incur provider charges.",
+        "Choose a provider and enter its API key and model ID. Testing sends a short streaming tool-call request and may incur provider charges.",
       provider: "Provider",
       name: "Unique name",
       displayName: "Display name",
@@ -1807,9 +2116,47 @@ export const enUS: Translations = {
         "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+      customProvider: "Custom OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "Advanced settings",
+      providerDefault: "Provider default",
+      requiredKey: "Enter the provider API key",
+      providerChanged:
+        "Connection changed. Enter a new API key; the saved key will not be reused.",
+      missing_api_key:
+        "This provider requires an API key. Enter a key, or disable the model before clearing its key.",
+      authentication_failed:
+        "Authentication failed. Check the API key and the provider region or plan.",
+      response_limit: "The test response exceeded its safe output limit.",
+      revisionConflict:
+        "The model changed or its name is reserved. Reload the list and reopen the editor. Your draft has been kept.",
+      keyOrCapabilities:
+        "Check the API key and capability overrides. Preset models must be disabled before removing their key.",
+      invalidModel:
+        "Invalid model configuration. Check the provider, model ID and advanced settings.",
+    },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
     },
     sections: {
       models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -1910,7 +2257,8 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
       adminRequired: "Admin privileges are required to manage MCP tools.",
@@ -2212,6 +2560,16 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
       exportPrevious: "Previous 50 files",
       exportNotices: {
         skill_export_yaml_alias:
@@ -2297,6 +2655,39 @@ export const enUS: Translations = {
       testBody: "This is a test notification.",
       notSupported: "Your browser does not support notifications.",
       disableNotification: "Disable notification",
+      channels: {
+        title: "Scheduled task notifications",
+        description:
+          "Choose which connected apps receive scheduled task updates. Turning these off does not affect chatting. Pending notifications and retries are cancelled, and turning them back on does not resend old updates. Notifications already being delivered may still arrive.",
+        providers: {
+          feishu: "Feishu / Lark",
+          wecom: "WeCom",
+          wechat: "WeChat",
+          qq: "QQ",
+        },
+        toggleLabel: (provider: string) =>
+          `${provider} scheduled task notifications`,
+        eventsTitle: "Task & goal run notifications",
+        eventsDescription:
+          "Optional IM reminders for ordinary web or background task runs and goals on your enabled apps above (off by default).",
+        events: {
+          run_completed: "Task or goal completed",
+          run_failed: "Task or goal failed",
+          human_input_requested: "Needs your input",
+        },
+        eventToggleLabel: (event: string) => `${event} notifications`,
+        loading: "Loading notification preferences…",
+        saving: "Saving…",
+        loadFailed:
+          "Could not load notification preferences. Please try again.",
+        saveFailed:
+          "Could not save this change. The previous setting is still shown; please try again.",
+        unavailable:
+          "This service does not support notification preferences yet.",
+        empty:
+          "Connect an app that supports scheduled task notifications in Settings → Channels.",
+        retry: "Retry",
+      },
     },
     account: {
       profileTitle: "Profile",
@@ -2361,6 +2752,12 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

@@ -51,6 +51,7 @@ from sqlalchemy import text
 
 from deerflow.persistence.engine import get_engine
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.http_policy import control_plane_trust_env
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -219,9 +220,9 @@ async def _probe_postgres_backend(conn_string: str, schema: str) -> str:
         logger.error("Readiness probe: psycopg is not installed for the postgres checkpointer backend")
         return PROBE_UNREACHABLE
     try:
-        from deerflow.persistence.postgres_schema import dsn_with_search_path, normalize_libpq_dsn
+        from deerflow.persistence.postgres_schema import dsn_with_search_path
 
-        dsn = dsn_with_search_path(normalize_libpq_dsn(conn_string), schema)
+        dsn = dsn_with_search_path(conn_string, schema)
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
             connection = await AsyncConnection.connect(dsn, connect_timeout=int(_PROBE_TIMEOUT_SECONDS))
             try:
@@ -313,10 +314,7 @@ def _make_provisioner_client(provisioner_url: str) -> httpx.AsyncClient:
     ``NO_PROXY``, so without this a private provisioner behind a proxy-only
     egress would be reported unreachable on every probe.
     """
-    # Lazy: importing the aio_sandbox package pulls in the whole provider stack.
-    from deerflow.community.aio_sandbox.backend import sandbox_http_trust_env
-
-    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS, trust_env=sandbox_http_trust_env(provisioner_url))
+    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS, trust_env=control_plane_trust_env(provisioner_url))
 
 
 async def _probe_provisioner(provisioner_url: str | None) -> str:
